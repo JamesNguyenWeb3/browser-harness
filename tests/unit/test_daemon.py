@@ -6,6 +6,14 @@ import pytest
 from browser_harness import daemon
 
 
+@pytest.fixture(autouse=True)
+def _isolate_stealth_env(monkeypatch):
+    """Keep ambient BH_* switches out of these assertions; tests that care
+    about one set it explicitly."""
+    for var in ("BH_FOCUS_EMULATION", "BH_TAB_MARKER"):
+        monkeypatch.delenv(var, raising=False)
+
+
 def test_publish_own_pid_never_truncates_parent_record(tmp_path, monkeypatch):
     pid_file = tmp_path / "daemon.pid"
     pid_file.write_text('{"pid":4321,"started":"process start with spaces"}')
@@ -111,8 +119,27 @@ def test_tab_marker_can_be_disabled_before_set_session_schedules_it(monkeypatch,
     assert not [call for call in d.cdp.calls if call[0] == "Runtime.evaluate"]
 
 
-def test_tab_marker_stays_enabled_by_default(monkeypatch):
+def test_tab_marker_is_off_by_default(monkeypatch):
+    """The title marker is page-readable, so it must not be applied by default."""
     monkeypatch.delenv("BH_TAB_MARKER", raising=False)
+    d = _fresh_daemon()
+
+    async def run():
+        await d.handle({
+            "meta": "set_session",
+            "session_id": "session-without-marker",
+            "target_id": "target-without-marker",
+        })
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+
+    assert not [call for call in d.cdp.calls if call[0] == "Runtime.evaluate"]
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
+def test_tab_marker_can_be_enabled(monkeypatch, value):
+    monkeypatch.setenv("BH_TAB_MARKER", value)
     d = _fresh_daemon()
 
     async def run():
@@ -145,12 +172,13 @@ def test_tab_marker_disabled_on_page_load_events(monkeypatch, value):
     assert not [call for call in d.cdp.calls if call[0] == "Runtime.evaluate"]
 
 
-def test_set_session_enables_all_four_default_domains_on_new_session():
+def test_set_session_enables_default_domains_on_new_session():
     """Regression: switch_tab() / new_tab() in helpers.py route through the
     `set_session` IPC, which previously only enabled Page on the new
     session. With Network disabled, wait_for_network_idle() silently stops
-    receiving events after a tab switch. Initial attach enables all four
-    (Page, DOM, Runtime, Network); set_session must enable the same set."""
+    receiving events after a tab switch. Initial attach enables the same set
+    (Page, DOM, Network); set_session must match it. Runtime is never enabled:
+    it makes Chrome serialize console arguments, which detectors probe."""
     d = _fresh_daemon()
     new_session = "session-AFTER-switch"
 
@@ -164,12 +192,27 @@ def test_set_session_enables_all_four_default_domains_on_new_session():
         method for (method, _params, sid) in d.cdp.calls
         if sid == new_session and method.endswith(".enable")
     ]
-    assert set(enabled_on_new) == {"Page.enable", "DOM.enable", "Runtime.enable", "Network.enable"}, (
-        f"set_session must enable Page/DOM/Runtime/Network on the new session "
+    assert set(enabled_on_new) == {"Page.enable", "Network.enable"}, (
+        f"set_session must enable Page/Network on the new session "
         f"(parity with initial attach). Got: {enabled_on_new}"
     )
+    focus = [
+        params for (method, params, sid) in d.cdp.calls
+        if sid == new_session and method == "Emulation.setFocusEmulationEnabled"
+    ]
+    assert focus == [{"enabled": True}]
     assert d.session == new_session
     assert d.target_id == "target-2"
+
+
+@pytest.mark.parametrize("value", ["0", "false", "NO", "off"])
+def test_focus_emulation_can_be_disabled(monkeypatch, value):
+    monkeypatch.setenv("BH_FOCUS_EMULATION", value)
+    d = _fresh_daemon()
+
+    asyncio.run(d._enable_default_domains("session-X"))
+
+    assert "Emulation.setFocusEmulationEnabled" not in [m for (m, _p, _s) in d.cdp.calls]
 
 
 def test_set_session_falls_back_to_existing_target_id_when_not_provided():
@@ -196,8 +239,8 @@ def test_enable_default_domains_swallows_errors_per_domain():
     class _PartialFailureCDP(_FakeCDP):
         async def send_raw(self, method, params=None, session_id=None):
             self.calls.append((method, params, session_id))
-            if method == "DOM.enable":
-                raise RuntimeError("simulated DOM failure")
+            if method == "Network.enable":
+                raise RuntimeError("simulated Network failure")
             return {}
 
     d = daemon.Daemon()
@@ -207,9 +250,9 @@ def test_enable_default_domains_swallows_errors_per_domain():
 
     attempted = [m for (m, _p, _s) in d.cdp.calls]
     assert "Page.enable" in attempted
-    assert "DOM.enable" in attempted  # attempted, but raised
-    assert "Runtime.enable" in attempted
-    assert "Network.enable" in attempted
+    assert "Network.enable" in attempted  # attempted, but raised
+    assert "Emulation.setFocusEmulationEnabled" in attempted
+    assert "Runtime.enable" not in attempted
 
 
 def test_set_session_disables_network_on_old_session_before_enabling_new():
@@ -264,7 +307,7 @@ def test_set_session_does_not_disable_network_when_no_previous_session():
 
 
 def test_set_session_runs_disable_and_enables_in_parallel():
-    """The four Domain.enable calls (plus Network.disable on the old session)
+    """The three Domain.enable calls (plus Network.disable on the old session)
     must run concurrently via asyncio.gather, not sequentially. With the old
     sequential code, helpers.switch_tab() would block in _send() for up to
     ~22s on a slow/remote daemon while the helper's IPC socket has a 5s
@@ -302,7 +345,9 @@ def test_set_session_runs_disable_and_enables_in_parallel():
         # in-flight. Cap iterations to avoid hanging if parallelization breaks.
         for _ in range(50):
             await asyncio.sleep(0)
-            # 5 = Network.disable on OLD + 4 enables on NEW.
+            # 4 = Network.disable on OLD + 3 enables on NEW.
+            # 5 = 2 teardown calls on OLD (Network.disable + focus emulation
+            # off) + 3 enables on NEW.
             if d.cdp.in_flight >= 5:
                 break
         peak = d.cdp.max_concurrent
@@ -312,19 +357,20 @@ def test_set_session_runs_disable_and_enables_in_parallel():
 
     peak, calls = asyncio.run(run())
     assert peak == 5, (
-        f"set_session must run disable + 4 enables concurrently via gather "
-        f"(observed peak in-flight = {peak}; expected 5 = 1 disable on OLD + "
-        f"4 enables on NEW). Sequential await would peak at 1."
+        f"set_session must run teardown + enables concurrently via gather "
+        f"(observed peak in-flight = {peak}; expected 5 = 2 teardown calls on "
+        f"OLD + 3 enables on NEW). Sequential await would peak at 1."
     )
     # Sanity: the right calls were made.
     methods = sorted({m for (m, _p, _s) in calls})
     assert "Network.disable" in methods
-    assert {"Page.enable", "DOM.enable", "Runtime.enable", "Network.enable"}.issubset(methods)
+    assert {"Page.enable", "Network.enable", "Emulation.setFocusEmulationEnabled"}.issubset(methods)
+    assert "Runtime.enable" not in methods
 
 
-def test_set_session_first_attach_runs_four_enables_in_parallel():
+def test_set_session_first_attach_runs_enables_in_parallel():
     """When there's no previous session, the disable path is skipped — only
-    the four enables run, still in parallel."""
+    the three enables run, still in parallel."""
     class _ConcurrencyProbeCDP:
         def __init__(self):
             self.calls = []
@@ -355,7 +401,7 @@ def test_set_session_first_attach_runs_four_enables_in_parallel():
         }))
         for _ in range(50):
             await asyncio.sleep(0)
-            if d.cdp.in_flight >= 4:
+            if d.cdp.in_flight >= 3:
                 break
         peak = d.cdp.max_concurrent
         d.cdp.release.set()
@@ -363,8 +409,8 @@ def test_set_session_first_attach_runs_four_enables_in_parallel():
         return peak
 
     peak = asyncio.run(run())
-    assert peak == 4, (
-        f"first set_session must run 4 enables concurrently "
+    assert peak == 3, (
+        f"first set_session must run 3 enables concurrently "
         f"(observed peak = {peak}). No Network.disable should fire."
     )
 
@@ -467,7 +513,7 @@ def test_named_daemon_creates_dedicated_tab(monkeypatch):
     create_calls = [p for (m, p, _s) in d.cdp.calls if m == "Target.createTarget"]
     assert create_calls == [{"url": "about:blank", "background": True}]
     enabled = {m for (m, _p, s) in d.cdp.calls if s == d.session and m.endswith(".enable")}
-    assert enabled == {"Page.enable", "DOM.enable", "Runtime.enable", "Network.enable"}
+    assert enabled == {"Page.enable", "Network.enable"}
 
 
 def test_default_daemon_still_attaches_first_page(monkeypatch):

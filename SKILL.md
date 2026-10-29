@@ -35,8 +35,7 @@ PY
 - At task completion, close tabs created for the task that are no longer needed.
   Keep a tab open if the user needs to see it, it is needed for a known follow-up,
   or closing it could discard unsaved work or other important state.
-- `new_tab()` and `switch_tab()` attach and move the horse marker without
-  changing Chrome's visible tab. Screenshots and normal CDP input work in the
+- `new_tab()` and `switch_tab()` attach without changing Chrome's visible tab. Screenshots and normal CDP input work in the
   background. Never call `activate_tab(target)` automatically: it brings Chrome
   to the foreground. Call it only when the user explicitly asks to see or
   visibly switch to that tab. Do not pair `switch_tab()` with `activate_tab()`.
@@ -46,12 +45,15 @@ PY
   Do not invent per-job names such as `gmail1375` or `slack1371`: every new
   local daemon opens another browser-level CDP connection and Chrome may show
   another Allow prompt.
-- Set `BH_TAB_MARKER=0` before starting the daemon to leave page titles unchanged.
-  The horse marker remains enabled by default.
+- Page titles are left unchanged by default: the horse marker is a page-readable
+  signal, so it is opt-in. Set `BH_TAB_MARKER=1` before starting the daemon to
+  show which tab the agent controls.
 - A timeout or page that pauses while hidden is not permission to foreground
-  Chrome. Keep using background CDP operations. For a focus-gated page,
-  temporarily call `cdp("Emulation.setFocusEmulationEnabled", enabled=True)`,
-  perform and verify the operation, then disable it in a `finally` block. If
+  Chrome. Keep using background CDP operations. Attaching already emulates
+  focus, so this normally needs nothing. If you opted out with
+  `BH_FOCUS_EMULATION=0` and hit a focus-gated page, temporarily call
+  `cdp("Emulation.setFocusEmulationEnabled", enabled=True)`, perform and
+  verify the operation, then disable it in a `finally` block. If
   background control still cannot work, report that limitation instead of
   activating the tab. Do not invent a `Runtime.evaluate` scroll replacement or
   a cross-frame JS walker.
@@ -183,7 +185,9 @@ Cloud profile cookie sync reference: https://github.com/browser-use/browser-harn
 ## Page Workflow
 
 - Prefer to find elements with the accessibility tree, not screenshots: `cdp("Accessibility.getFullAXTree")["nodes"]` has every element's role, name, and `backendDOMNodeId` — filter in Python before printing (it is thousands of nodes). Coordinates: `q = cdp("DOM.getBoxModel", backendNodeId=n)["model"]["content"]; x, y = sum(q[0::2])/4, sum(q[1::2])/4` (viewport px, ready for `click_at_xy`; negative/oversized means scroll first).
-- Clicking: AX node -> box center -> `click_at_xy(x, y)` -> verify with a targeted `js(...)`/`page_info()` check.
+- Clicking: AX node -> box center -> `click_at_xy(x, y)` -> verify with a targeted `js(...)`/`page_info()` check. Add `jitter=4` to vary the landing point on a large target; `scroll(x, y, dy, steps=6)` sends a trackpad-like gesture.
+- Attaching emulates focus, so the attached tab reports `visibilityState === "visible"` and accepts mouse movement even while it is a background tab. Set `BH_FOCUS_EMULATION=0` before starting the daemon to restore real background throttling (mouse movement then does not work in hidden tabs).
+- `fill_input` types real keys with a ~50 ms randomized gap. Pass `typing_delay=0` for bulk text; `type_text` stays instant.
 - Fall back to raw HTML via `js(...)` only when the AX tree lacks the element (canvas, exotic widgets); screenshot when layout or imagery matters.
 - After navigation, call `wait_for_load()`.
 - If the current tab is stale or internal, call `ensure_real_tab()`.

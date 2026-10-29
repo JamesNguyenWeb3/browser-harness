@@ -3,7 +3,7 @@
 Core helpers live here. Agent-editable helpers live in
 BH_AGENT_WORKSPACE/agent_helpers.py.
 """
-import base64, importlib.util, json, math, os, time, urllib.request
+import base64, importlib.util, json, math, os, random, time, urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -170,8 +170,47 @@ def page_info():
 
 # --- input ---
 _debug_click_counter = 0
+_last_mouse = None  # (x, y) of the synthetic cursor; None until the first move.
 
-def click_at_xy(x, y, button="left", clicks=1):
+
+def _mouse_move_to(x, y, steps=6):
+    """Walk the cursor to (x, y) with mouseMoved events so a click is not a teleport.
+
+    Eases out on approach and jitters each step, so the path is not a straight
+    line a page could test for. Starts from a random point near the target on
+    the first click, then from wherever the previous one ended.
+
+    Only moves in a visible tab: a hidden tab never acks mouseMoved, so the
+    call would block until the IPC timeout. Activating the tab to enable the
+    move is not an option — background clicks must not steal focus.
+    """
+    global _last_mouse
+    try:
+        if js("document.visibilityState") != "visible":
+            _last_mouse = (x, y)
+            return
+        sx, sy = _last_mouse or (x + random.randint(-120, 120), y + random.randint(-80, 80))
+        for i in range(1, steps + 1):
+            e = 1 - (1 - i / steps) ** 2
+            px = round(sx + (x - sx) * e + random.uniform(-1.5, 1.5))
+            py = round(sy + (y - sy) * e + random.uniform(-1.5, 1.5))
+            cdp("Input.dispatchMouseEvent", type="mouseMoved", x=px, y=py, button="none", buttons=0, _response_timeout=1.5)
+            time.sleep(random.uniform(0.004, 0.012))
+    except Exception:
+        pass  # occluded or busy renderer: fall back to a direct press
+    _last_mouse = (x, y)
+
+def click_at_xy(x, y, button="left", clicks=1, jitter=0, move=True):
+    """Click at (x, y). jitter>0 offsets the point by up to that many pixels,
+    which keeps every click from landing on the exact same coordinate.
+
+    move=False teleports the cursor instead of walking it there. Each movement
+    step is a CDP round trip, so on a remote/cloud daemon (50-200ms per call)
+    disabling movement can save ~1s per click. BH_CLICK_MOVES=0 does the same
+    globally."""
+    if jitter:
+        x += random.randint(-jitter, jitter)
+        y += random.randint(-jitter, jitter)
     if os.environ.get("BH_DEBUG_CLICKS"):
         global _debug_click_counter
         try:
@@ -190,11 +229,26 @@ def click_at_xy(x, y, button="left", clicks=1):
         except Exception as e:
             print(f"[debug_click] overlay failed: {e}")
         _debug_click_counter += 1
-    cdp("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button=button, clickCount=clicks)
-    cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button=button, clickCount=clicks)
+    if move and os.environ.get("BH_CLICK_MOVES", "").strip().lower() not in {"0", "false", "no", "off"}:
+        _mouse_move_to(x, y)
+    # A human settles on the target before pressing; an instant press does not.
+    time.sleep(random.uniform(0.05, 0.15))
+    # DOM MouseEvent.buttons is derived from the modifier bits, not `button`:
+    # without this a mousedown reports buttons===0 where a real click reports 1.
+    held = {"left": 1, "right": 2, "middle": 4}.get(button, 1)
+    for n in range(1, max(1, clicks) + 1):
+        cdp("Input.dispatchMouseEvent", type="mousePressed", x=x, y=y, button=button, buttons=held, clickCount=n)
+        cdp("Input.dispatchMouseEvent", type="mouseReleased", x=x, y=y, button=button, buttons=0, clickCount=n)
 
-def type_text(text):
-    cdp("Input.insertText", text=text)
+def type_text(text, typing_delay=0.0):
+    """Insert text. typing_delay>0 types key by key with randomized gaps;
+    the default is the fast IME path, which emits no key events at all."""
+    if typing_delay <= 0:
+        cdp("Input.insertText", text=text)
+        return
+    for ch in text:
+        press_key(ch)
+        time.sleep(random.uniform(typing_delay * 0.5, typing_delay * 1.5))
 
 _SELECT_ALL_MODIFIER = None
 def _select_all_modifier():
@@ -205,12 +259,22 @@ def _select_all_modifier():
         _SELECT_ALL_MODIFIER = 4 if "Mac OS X" in ua or "Macintosh" in ua else 2
     return _SELECT_ALL_MODIFIER
 
-def fill_input(selector, text, clear_first=True, timeout=0.0):
+def fill_input(selector, text, clear_first=True, timeout=0.0, typing_delay=0.05, fire_change=True):
     """Fill a framework-managed input (React controlled, Vue v-model, Ember tracked).
 
     type_text() uses Input.insertText which bypasses framework event listeners and leaves
-    submit buttons disabled. This helper focuses the element, clears it, types via real
-    key events, then fires synthetic input+change events so the framework sees the update.
+    submit buttons disabled. This helper focuses the element, clears it, and types via
+    real key events. Those keystrokes fire native trusted input events, which is what
+    framework onChange handlers listen to, so no synthetic `input` is dispatched.
+
+    A synthetic `change` still follows, because a real one only fires on blur and an
+    agent often submits without blurring; change-only (legacy/Ember/jQuery) forms
+    would otherwise never see the value. It is untrusted, so pass
+    fire_change=False where that matters.
+
+    typing_delay spaces keystrokes by a randomized gap (in seconds) instead of
+    typing the whole string in one millisecond, which is a timing tell on
+    logged-in or sensitive fields. Pass 0 for bulk text where speed matters.
 
     Raises RuntimeError if the element is not found. Pass timeout>0 to wait for
     late-rendered elements (e.g. after a route change) before typing.
@@ -239,12 +303,13 @@ def fill_input(selector, text, clear_first=True, timeout=0.0):
         press_key("Backspace")
     for ch in text:
         press_key(ch)
-    js(
-        f"(()=>{{const e=document.querySelector({json.dumps(selector)});"
-        f"if(!e)return;"
-        f"e.dispatchEvent(new Event('input',{{bubbles:true}}));"
-        f"e.dispatchEvent(new Event('change',{{bubbles:true}}));}})();"
-    )
+        if typing_delay > 0:
+            time.sleep(random.uniform(typing_delay * 0.5, typing_delay * 1.5))
+    if fire_change:
+        js(
+            f"(()=>{{const e=document.querySelector({json.dumps(selector)});"
+            f"if(e)e.dispatchEvent(new Event('change',{{bubbles:true}}));}})();"
+        )
 
 _KEYS = {  # key → (windowsVirtualKeyCode, code, text)
     "Enter": (13, "Enter", "\r"), "Tab": (9, "Tab", "\t"), "Backspace": (8, "Backspace", ""),
@@ -323,8 +388,16 @@ def press_key(key, modifiers=0):
         cdp("Input.dispatchKeyEvent", type="char", text=text, **{k: v for k, v in base.items() if k != "text"})
     cdp("Input.dispatchKeyEvent", type="keyUp", **base)
 
-def scroll(x, y, dy=-300, dx=0):
-    cdp("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y, deltaX=dx, deltaY=dy)
+def scroll(x, y, dy=-300, dx=0, steps=1):
+    """Scroll by (dx, dy). steps>1 sends a gesture of smaller wheel events,
+    which is what a trackpad produces. CDP exposes no phase parameter for
+    mouseWheel, so this is the closest equivalent."""
+    steps = max(1, steps)
+    for i in range(steps):
+        cdp("Input.dispatchMouseEvent", type="mouseWheel", x=x, y=y,
+            deltaX=dx / steps, deltaY=dy / steps)
+        if i + 1 < steps:
+            time.sleep(random.uniform(0.008, 0.025))
 
 
 # --- visual ---
@@ -385,9 +458,16 @@ def current_tab():
         "title": r["title"],
     }
 
+def _tab_marker_on():
+    """Opt-in: the marker is page-readable, so it is off unless BH_TAB_MARKER is truthy."""
+    return os.environ.get("BH_TAB_MARKER", "").strip().lower() in {"1", "true", "yes", "on"}
+
 def _mark_tab():
-    """Prepend horse emoji to tab title so the user can see which tab the agent controls."""
-    if os.environ.get("BH_TAB_MARKER", "").strip().lower() in {"0", "false", "no", "off"}:
+    """Prepend horse emoji to tab title so the user can see which tab the agent controls.
+
+    Off by default (BH_TAB_MARKER=1 to enable): any page script can read it.
+    """
+    if not _tab_marker_on():
         return
     try: cdp("Runtime.evaluate", expression="if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title")
     except Exception: pass
@@ -417,6 +497,9 @@ def switch_tab(target, activate=False):
     target_id = _target_id(target)
     # Unmark old tab. Horse emoji is a surrogate pair in JS UTF-16 strings (2 code units),
     # plus the trailing space = 3 code units, so slice(3) cleanly removes the prefix.
+    # Unconditional: the daemon may have applied the marker even when this
+    # helper process has BH_TAB_MARKER unset, and stripping is a no-op when
+    # there is no prefix.
     try: cdp("Runtime.evaluate", expression="if(document.title.startsWith('\U0001F434 '))document.title=document.title.slice(3)")
     except Exception: pass
     if activate:

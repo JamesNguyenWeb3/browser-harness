@@ -460,7 +460,7 @@ Developer list from `developer_apps()`: `app_id`, `title`, `developer`, `rating`
 - **Numbers are live.** Spotify's ratings count changed between fetches minutes apart. Store a fetch timestamp with every row.
 - **Missing app in the browser:** the page title becomes `Not Found` and there is no JSON-LD block; block 2 reports that as `not_found: true` with `null` fields.
 - **`version` is often null** for apps that ship per-device builds (Spotify, VLC). That is the page's "Varies with device", not a parse failure.
-- **The harness prefixes the tab title with a horse marker** while attached, so `document.title` is not the app name; use JSON-LD `name`.
+- **`document.title` is not the app name** (and if the daemon runs with `BH_TAB_MARKER=1` it carries a horse-emoji prefix); use JSON-LD `name`.
 - **Pacing:** 1 request per 0.5-1 s over HTTP and about one browser page load per second were never throttled today. Keep at least that spacing. On a 429 the code backs off; if Play asks for more than 120 s it stops.
 
 ## What does not work
