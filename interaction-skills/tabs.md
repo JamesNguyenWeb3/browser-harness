@@ -8,7 +8,7 @@ Use **CDP for control**, **UI automation for user-visible order**.
 tabs = list_tabs()                    # includes chrome:// pages too
 real_tabs = list_tabs(include_chrome=False)
 tid = new_tab("https://example.com")  # create + attach in the background
-switch_tab(tid)                       # attach harness, move the horse marker
+switch_tab(tid)                       # attach harness (horse marker only if BH_TAB_MARKER=1)
 activate_tab(tid)                     # optional: explicitly show it in Chrome
 print(current_tab())
 print(page_info())

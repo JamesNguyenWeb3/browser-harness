@@ -130,9 +130,24 @@ RECOVERY_CANCEL_DRAIN_TIMEOUT = 2
 TAB_MARKER_JS = "if(!document.title.startsWith('\U0001F434'))document.title='\U0001F434 '+document.title"
 
 
+def focus_emulation_enabled():
+    """Whether the attached tab should report itself visible and focused.
+
+    A hidden tab never acks mouseMoved/mouseWheel (the call blocks until the
+    IPC timeout) yet delivers trusted input while document.visibilityState is
+    'hidden' — something no human can produce. Emulating focus makes the page
+    match the input it actually receives. Set BH_FOCUS_EMULATION=0 to opt out.
+    """
+    return os.environ.get("BH_FOCUS_EMULATION", "").strip().lower() not in {"0", "false", "no", "off"}
+
+
 def tab_marker_enabled():
-    """Whether the cosmetic controlled-tab title marker should be added."""
-    return os.environ.get("BH_TAB_MARKER", "").strip().lower() not in {"0", "false", "no", "off"}
+    """Whether the cosmetic controlled-tab title marker should be added.
+
+    Opt-in: the marker is a deterministic, page-readable signal that the tab is
+    agent-controlled, so it is off unless BH_TAB_MARKER is truthy.
+    """
+    return os.environ.get("BH_TAB_MARKER", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _devtools_port_live(base):
@@ -539,28 +554,38 @@ class Daemon:
             pass
 
     async def _enable_default_domains(self, session_id):
-        """Enable Page/DOM/Runtime/Network on a CDP session.
+        """Set up a CDP session after attach or set_session (switch_tab/new_tab).
 
-        Used by both initial attach and set_session (called after switch_tab/
-        new_tab). Without this, helpers that depend on Network.* events —
-        notably wait_for_network_idle() — silently stop receiving events
-        after a tab switch, because each fresh CDP session starts with all
-        domains disabled.
+        Without Page/Network, helpers that depend on their events — notably
+        wait_for_network_idle() and dialog handling — silently stop receiving
+        events after a tab switch, because each fresh CDP session starts with
+        all domains disabled.
 
-        Runs the four enables in parallel via gather so the worst-case time is
-        bounded by a single CDP round trip rather than four sequential ones —
+        Runtime is deliberately absent: enabling it makes Chrome serialize
+        console arguments, which runs page getters (Error.prepareStackTrace)
+        and is the probe detectors use to flag a CDP client. Runtime.evaluate
+        works without it, and nothing here consumes Runtime events. DOM is
+        absent too: DOM.getDocument enables the agent on demand, and no DOM
+        event is consumed.
+
+        Runs every call in parallel via gather so the worst-case time is
+        bounded by a single CDP round trip rather than one per call —
         important on the set_session path, where the helper's IPC socket has
         a 5s read timeout.
         """
-        async def enable_one(d):
+        async def call(method, params=None):
             try:
                 await asyncio.wait_for(
-                    self.cdp.send_raw(f"{d}.enable", session_id=session_id),
+                    self.cdp.send_raw(method, params, session_id=session_id),
                     timeout=4,
                 )
             except Exception as e:
-                log(f"enable {d} on {session_id}: {e}")
-        await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Runtime", "Network")))
+                log(f"{method} on {session_id}: {e}")
+
+        calls = [call("Page.enable"), call("Network.enable")]
+        if focus_emulation_enabled():
+            calls.append(call("Emulation.setFocusEmulationEnabled", {"enabled": True}))
+        await asyncio.gather(*calls)
 
     def _record_session_replacement(self, stale_session, replacement_session):
         """Remember which recovered session still controls the same tab."""
@@ -715,7 +740,7 @@ class Daemon:
             # Run the old-session Network.disable (defense in depth — keeps
             # background-tab traffic out of the global event buffer; the
             # consumer-side filter in wait_for_network_idle is the actual
-            # correctness gate) in parallel with the four enables on the new
+            # correctness gate) in parallel with the enables on the new
             # session. Different sessions, independent CDP requests. Keeps
             # the synchronous reply under the helper's 5s IPC read timeout
             # even on a remote daemon — sequentially these would have stacked
@@ -723,12 +748,20 @@ class Daemon:
             tasks = []
             if old_session and old_session != new_session:
                 async def disable_old():
-                    try:
-                        await asyncio.wait_for(
-                            self.cdp.send_raw("Network.disable", session_id=old_session),
-                            timeout=2,
-                        )
-                    except Exception: pass
+                    # Undo focus emulation too, or the tab we just left keeps
+                    # rendering as if it were visible. Both run concurrently so
+                    # a dead session costs one 2s timeout, not two.
+                    async def send(method, params=None):
+                        try:
+                            await asyncio.wait_for(
+                                self.cdp.send_raw(method, params, session_id=old_session),
+                                timeout=2,
+                            )
+                        except Exception: pass
+                    await asyncio.gather(
+                        send("Network.disable"),
+                        send("Emulation.setFocusEmulationEnabled", {"enabled": False}),
+                    )
                 tasks.append(disable_old())
             tasks.append(self._enable_default_domains(new_session))
             await asyncio.gather(*tasks)

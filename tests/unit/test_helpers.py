@@ -123,7 +123,7 @@ def test_page_info_raises_clear_error_on_js_exception():
 
 # --- fill_input ---
 
-def test_fill_input_focuses_types_and_fires_events():
+def test_fill_input_focuses_and_types_with_real_keys():
     cdp_calls = []
     js_calls = []
 
@@ -142,7 +142,36 @@ def test_fill_input_focuses_types_and_fires_events():
     assert any("#my-input" in e for e in js_calls)
     key_downs = [m for m, _ in cdp_calls if m == "Input.dispatchKeyEvent"]
     assert len(key_downs) > 0
-    assert any("input" in e and "change" in e for e in js_calls)
+    # Real keystrokes fire native trusted `input`, so no synthetic `input` is
+    # dispatched. A synthetic `change` still follows for change-only forms,
+    # which would otherwise never see the value without a blur.
+    dispatched = [e for e in js_calls if "dispatchEvent" in e]
+    assert len(dispatched) == 1
+    assert "change" in dispatched[0] and "'input'" not in dispatched[0]
+
+
+def test_fill_input_can_skip_the_synthetic_change(monkeypatch):
+    js_calls = []
+    monkeypatch.setattr(helpers, "cdp", lambda method, **kw: {})
+    monkeypatch.setattr(helpers, "js", lambda expr, **kw: js_calls.append(expr) or True)
+    monkeypatch.setattr(helpers.time, "sleep", lambda *_: None)
+
+    helpers.fill_input("#inp", "ab", clear_first=False, fire_change=False)
+
+    assert not [e for e in js_calls if "dispatchEvent" in e]
+
+
+def test_fill_input_spaces_keystrokes_by_default(monkeypatch):
+    """Typing a whole string in one millisecond is a timing tell on forms."""
+    sleeps = []
+    monkeypatch.setattr(helpers, "cdp", lambda method, **kw: {})
+    monkeypatch.setattr(helpers, "js", lambda *_a, **_k: True)
+    monkeypatch.setattr(helpers.time, "sleep", lambda s: sleeps.append(s))
+
+    helpers.fill_input("#inp", "abc", clear_first=False)
+
+    assert len(sleeps) == 3
+    assert all(0 < s < 0.2 for s in sleeps)
 
 
 def test_fill_input_raises_when_element_not_found():
@@ -437,6 +466,87 @@ def test_mark_tab_can_be_disabled(monkeypatch, value):
     helpers._mark_tab()
 
     assert calls == []
+
+
+def test_mark_tab_is_off_by_default_and_can_be_enabled(monkeypatch):
+    calls = []
+    monkeypatch.delenv("BH_TAB_MARKER", raising=False)
+    monkeypatch.setattr(
+        helpers,
+        "cdp",
+        lambda method, **kwargs: calls.append((method, kwargs)),
+    )
+
+    helpers._mark_tab()
+    assert calls == []
+
+    monkeypatch.setenv("BH_TAB_MARKER", "1")
+    helpers._mark_tab()
+    assert [m for m, _ in calls] == ["Runtime.evaluate"]
+
+
+# --- click synthesis ---
+
+def _record_clicks(monkeypatch, x=100, y=200, visible="visible", **kwargs):
+    calls = []
+    monkeypatch.setattr(helpers, "cdp", lambda method, **kw: calls.append(kw))
+    monkeypatch.setattr(helpers.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(helpers, "js", lambda *_a, **_k: visible)
+    helpers.click_at_xy(x, y, **kwargs)
+    return calls
+
+
+def test_click_moves_the_cursor_before_pressing(monkeypatch):
+    calls = _record_clicks(monkeypatch)
+    moves = [c for c in calls if c["type"] == "mouseMoved"]
+    assert len(moves) >= 6
+    # The last movement lands on the click point; nothing moves after the press.
+    assert calls[-2]["type"] == "mousePressed"
+    assert calls[-1]["type"] == "mouseReleased"
+
+
+def test_hidden_tab_skips_movement_but_still_clicks(monkeypatch):
+    """A hidden tab never acks mouseMoved, so movement would block the click."""
+    calls = _record_clicks(monkeypatch, visible="hidden")
+    assert not [c for c in calls if c["type"] == "mouseMoved"]
+    assert [c["type"] for c in calls] == ["mousePressed", "mouseReleased"]
+
+
+def test_click_can_skip_cursor_movement(monkeypatch):
+    """Each movement step is a CDP round trip; remote daemons can opt out."""
+    calls = _record_clicks(monkeypatch, move=False)
+    assert not [c for c in calls if c["type"] == "mouseMoved"]
+    assert [c["type"] for c in calls] == ["mousePressed", "mouseReleased"]
+
+
+def test_click_sets_the_buttons_bit_that_a_real_click_sets(monkeypatch):
+    calls = _record_clicks(monkeypatch)
+    press = next(c for c in calls if c["type"] == "mousePressed")
+    release = next(c for c in calls if c["type"] == "mouseReleased")
+    assert press["buttons"] == 1  # mousedown.buttons === 1, as a physical click reports
+    assert release["buttons"] == 0
+
+
+def test_multi_click_sends_one_pair_per_click(monkeypatch):
+    calls = _record_clicks(monkeypatch, clicks=3)
+    assert [c["clickCount"] for c in calls if c["type"] == "mousePressed"] == [1, 2, 3]
+    assert [c["clickCount"] for c in calls if c["type"] == "mouseReleased"] == [1, 2, 3]
+
+
+def test_type_text_defaults_to_insert_text(monkeypatch):
+    calls = []
+    monkeypatch.setattr(helpers, "cdp", lambda method, **kw: calls.append((method, kw)))
+    helpers.type_text("hi")
+    assert [m for m, _ in calls] == ["Input.insertText"]
+
+
+def test_type_text_with_delay_sends_real_key_events(monkeypatch):
+    calls = []
+    monkeypatch.setattr(helpers, "cdp", lambda method, **kw: calls.append((method, kw)))
+    monkeypatch.setattr(helpers.time, "sleep", lambda *_: None)
+    helpers.type_text("ab", typing_delay=0.05)
+    assert "Input.insertText" not in [m for m, _ in calls]
+    assert [m for m, _ in calls] == ["Input.dispatchKeyEvent"] * 6
 
 
 def test_switch_tab_keeps_visible_tab_unchanged_by_default(monkeypatch):
