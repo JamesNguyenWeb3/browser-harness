@@ -741,6 +741,11 @@ def _load_agent_helpers():
     if not spec or not spec.loader:
         return
     module = importlib.util.module_from_spec(spec)
+    # Agent helpers are pasted in like core helpers: they call js(), click_at_xy(),
+    # cdp() unqualified. Give the module those names without the loader's own
+    # dunders (__package__ would make exec_module reject the module).
+    injected = {k: v for k, v in globals().items() if not k.startswith("__")}
+    module.__dict__.update(injected)
     spec.loader.exec_module(module)
     for name, value in vars(module).items():
         if name.startswith("_"):

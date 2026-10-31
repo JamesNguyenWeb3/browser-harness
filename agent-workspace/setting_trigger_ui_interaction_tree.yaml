@@ -1,0 +1,342 @@
+
+setting_trigger:
+  inspection:
+    "tag": "button"
+    "ariaLabel": "Settings trigger"
+    "role": null,
+    "id": null,
+    "selector": null,
+    "inShadowRoot": false
+  action: click
+  reveals:
+    settings-content:
+      options:
+        - inspection:
+            "tag": "button"
+            "text": "image\nImage"
+            "ariaLabel": null,
+            "role": "radio"
+            "id": "mat-button-toggle-5-button"
+            "selector": "#mat-button-toggle-5-button"
+            "inShadowRoot": false
+          action: click
+          reveals:
+            - aspect_ratio:
+                option_toggles:
+                  - inspection:
+                      "tag": "button"
+                      "text": "crop_16_9\n16:9"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-7-button"
+                      "selector": "#mat-button-toggle-7-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "crop_landscape\n4:3"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-8-button"
+                      "selector": "#mat-button-toggle-8-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "crop_square\n1:1"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-9-button"
+                      "selector": "#mat-button-toggle-9-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "crop_portrait\n3:4"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-10-button"
+                      "selector": "#mat-button-toggle-10-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "crop_9_16\n9:16"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-11-button"
+                      "selector": "#mat-button-toggle-11-button"
+                      "inShadowRoot": false
+
+            - select_model:
+                inspection:
+                  "tag": "button"
+                  "ariaLabel": "Select model family"
+                  "role": null,
+                  "id": null,
+                  "selector": null,
+                  "inShadowRoot": false
+                action: click
+                reveals:
+                  menu_content:
+                    option:
+                      - inspection:
+                          "tag": "button"
+                          "text": "🍌 Nano Banana Pro"
+                          "ariaLabel": null,
+                          "role": "menuitem"
+                          "id": null,
+                          "selector": null,
+                          "inShadowRoot": false
+                      - inspection:
+                          "tag": "button"
+                          "text": "🍌 Nano Banana 2 Lite"
+                          "ariaLabel": null,
+                          "role": "menuitem"
+                          "id": null,
+                          "selector": null,
+                          "inShadowRoot": false
+                      - inspection:
+                          "tag": "button"
+                          "text": "🍌 Nano Banana 2.1"
+                          "ariaLabel": null,
+                          "role": "menuitem"
+                          "id": null,
+                          "selector": null,
+                          "inShadowRoot": false         
+
+            - output_count:
+                option_toggles:
+                  - inspection:
+                      "tag": "button"
+                      "text": "x1"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-12-button"
+                      "selector": "#mat-button-toggle-12-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "x2"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-13-button"
+                      "selector": "#mat-button-toggle-13-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "x3"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-14-button"
+                      "selector": "#mat-button-toggle-14-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "x4"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-15-button"
+                      "selector": "#mat-button-toggle-15-button"
+                      "inShadowRoot": false       
+        
+
+        - inspection:
+            "tag": "button"
+            "text": "videocam\nVideo"
+            "ariaLabel": null,
+            "role": "radio"
+            "id": "mat-button-toggle-6-button"
+            "selector": "#mat-button-toggle-6-button"
+            "inShadowRoot": false
+          action: click
+          reveals:
+            - video_type:
+                option_toggles:
+                  - inspection:
+                      "tag": "button"
+                      "text": "crop_free\nFrames"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-74-button"
+                      "selector": "#mat-button-toggle-74-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "chrome_extension\nIngredients"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-75-button"
+                      "selector": "#mat-button-toggle-75-button"
+                      "inShadowRoot": false
+            - aspect_ratio:
+                option_toggles:
+                  - inspection:
+                      "tag": "button"
+                      "text": "crop_16_9\n16:9"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-7-button"
+                      "selector": "#mat-button-toggle-7-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "crop_9_16\n9:16"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-11-button"
+                      "selector": "#mat-button-toggle-11-button"
+                      "inShadowRoot": false
+            - select_model_family:
+                inspection:
+                  "tag": "button"
+                  "ariaLabel": "Select model family"
+                  "role": null,
+                  "id": null,
+                  "selector": null,
+                  "inShadowRoot": false
+                action: click
+                reveals:
+                  menu_content:
+                    option:
+                      - inspection:
+                          "tag": "button"
+                          "text": "volume_up\nOmni 1.1 Flash"
+                          "ariaLabel": null,
+                          "role": "menuitem"
+                          "id": null,
+                          "selector": null,
+                          "inShadowRoot": false
+                        action: click
+                        reveals:
+                          - video_resolution:
+                              option_toggles:
+                                - inspection:
+                                    "tag": "button"
+                                    "text": "360p\ninfo"
+                                    "ariaLabel": null,
+                                    "role": "radio"
+                                    "id": "mat-button-toggle-76-button"
+                                    "selector": "#mat-button-toggle-76-button"
+                                    "inShadowRoot": false
+                                - inspection:
+                                    "tag": "button"
+                                    "text": "720p"
+                                    "ariaLabel": null,
+                                    "role": "radio"
+                                    "id": "mat-button-toggle-77-button"
+                                    "selector": "#mat-button-toggle-77-button"
+                                    "inShadowRoot": false
+                          - video_duration:
+                              option_toggles:
+                                - inspection:
+                                    "tag": "button"
+                                    "text": "4s"
+                                    "ariaLabel": null,
+                                    "role": "radio"
+                                    "id": "mat-button-toggle-78-button"
+                                    "selector": "#mat-button-toggle-78-button"
+                                    "inShadowRoot": false
+                                - inspection:
+                                    "tag": "button"
+                                    "text": "6s"
+                                    "ariaLabel": null,
+                                    "role": "radio"
+                                    "id": "mat-button-toggle-79-button"
+                                    "selector": "#mat-button-toggle-79-button"
+                                    "inShadowRoot": false
+                                - inspection:
+                                    "tag": "button"
+                                    "text": "8s"
+                                    "ariaLabel": null,
+                                    "role": "radio"
+                                    "id": "mat-button-toggle-80-button"
+                                    "selector": "#mat-button-toggle-80-button"
+                                    "inShadowRoot": false
+                                - inspection:
+                                    "tag": "button"
+                                    "text": "10s"
+                                    "ariaLabel": null,
+                                    "role": "radio"
+                                    "id": "mat-button-toggle-81-button"
+                                    "selector": "#mat-button-toggle-81-button"
+                                    "inShadowRoot": false
+                        
+                      - inspection:
+                          "tag": "button"
+                          "text": "volume_up\nVeo 3.1 - Lite"
+                          "ariaLabel": null,
+                          "role": "menuitem"
+                          "id": null,
+                          "selector": null,
+                          "inShadowRoot": false
+                      - inspection:
+                          "tag": "button"
+                          "text": "volume_up\nVeo 3.1 - Fast"
+                          "ariaLabel": null,
+                          "role": "menuitem"
+                          "id": null,
+                          "selector": null,
+                          "inShadowRoot": false
+                      - inspection:
+                          "tag": "button"
+                          "text": "volume_up\nVeo 3.1 - Quality"
+                          "ariaLabel": null,
+                          "role": "menuitem"
+                          "id": null,
+                          "selector": null,
+                          "inShadowRoot": false
+            - output_count:
+                option_toggles:
+                  - inspection:
+                      "tag": "button"
+                      "text": "x1"
+                      "ariaLabel": null
+                      "role": "radio"
+                      "id": "mat-button-toggle-98-button"
+                      "selector": "#mat-button-toggle-98-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "x2"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-99-button"
+                      "selector": "#mat-button-toggle-99-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "x3"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-100-button"
+                      "selector": "#mat-button-toggle-100-button"
+                      "inShadowRoot": false
+                  - inspection:
+                      "tag": "button"
+                      "text": "x4"
+                      "ariaLabel": null,
+                      "role": "radio"
+                      "id": "mat-button-toggle-101-button"
+                      "selector": "#mat-button-toggle-101-button"
+                      "inShadowRoot": false
+
+
+          
+            
+            
+
+
+
+
+#// Paste into Chrome DevTools Console while target element is selected ($0)
+#(() => {
+#  const el = $0;
+#  const r = el.getBoundingClientRect();
+#  copy(JSON.stringify({
+#    tag: el.tagName.toLowerCase(),
+#    text: el.innerText?.trim() || null,
+#    ariaLabel: el.getAttribute('aria-label') || el.getAttribute('placeholder') || null,
+#    role: el.getAttribute('role') || null,
+#    id: el.id || null,
+#    selector: el.id ? `#${el.id}` : (el.name ? `[name="${el.name}"]` : null),
+#    inShadowRoot: !!el.getRootNode()?.host
+#  }, null, 2));
+#  console.log("Copied element metadata to clipboard!");
+#})();
