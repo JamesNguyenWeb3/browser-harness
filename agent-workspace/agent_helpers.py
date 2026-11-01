@@ -4,7 +4,7 @@ Add task-specific browser primitives here. Core helpers from browser_harness.hel
 load this file when BH_AGENT_WORKSPACE points at this directory, or when this
 repo's default agent-workspace exists.
 """
-import json as _json, time as _t
+import json as _json, os as _os, time as _t
 
 # --- Google Flow: generation settings trigger ---
 # The panel's element ids (mat-button-toggle-N) are reassigned on every render,
@@ -208,3 +208,181 @@ def generate_setting_trigger(generate_type="video", aspect_ratio=None, model=Non
     label = _flow_trigger_label() if verify else None
     return {"ok": bool(label) and not [w for w in warnings if "not found" in w],
             "trigger": label, "applied": applied, "warnings": warnings}
+
+# --- Google Flow: prompt + reference ingredients ---
+# The prompt box is a ProseMirror contenteditable: JS range edits are ignored, so
+# text goes in through real key events. References are not part of the editor DOM;
+# each one becomes a <flow-ingredient-chip> beside it.
+
+_FLOW_EDITOR = "flow-rich-text-editor .ProseMirror"
+_FLOW_MAX_INGREDIENTS = 4  # the picker stops adding past four
+
+def _flow_editor_text():
+    return js(f"""(()=>{{const e=document.querySelector({_FLOW_EDITOR!r});return e?e.innerText:null;}})()""")
+
+def _flow_chips():
+    return js("document.querySelectorAll('flow-ingredient-chip').length")
+
+def _flow_click_js(find, wait_s=1.0):
+    """Centre-click the element returned by a JS expression, or False if absent."""
+    js(f"""(()=>{{const b={find}; if(!b){{window.__bhp=null;return;}}
+      const r=b.getBoundingClientRect(); window.__bhp={{x:r.x+r.width/2,y:r.y+r.height/2}};}})()""")
+    p = js("window.__bhp")
+    if not p: return False
+    click_at_xy(p["x"], p["y"]); _t.sleep(wait_s); return True
+
+_OPEN_INGREDIENTS = ("[...document.querySelectorAll('button')]"
+                     ".find(x=>x.getAttribute('aria-label')==='Add ingredients to the prompt box')")
+_UPLOAD_MEDIA = ("[...document.querySelectorAll('.cdk-overlay-pane button')]"
+                 ".find(x=>/Upload media/.test(x.innerText))")
+_ADD_TO_PROMPT = ("[...document.querySelectorAll('.cdk-overlay-pane button')]"
+                  ".find(x=>/Add to prompt/i.test(x.innerText))")
+
+def _flow_overlay_open():
+    return bool(js("!!document.querySelector('.cdk-overlay-pane')"))
+
+def _flow_open_picker(retries=3):
+    """Open the ingredients picker. Attaching closes it with a backdrop that eats the
+    next click for a few hundred ms, so wait for it to be gone and retry the open."""
+    for _ in range(retries):
+        if _flow_overlay_open(): return True
+        if not _flow_click_js(_OPEN_INGREDIENTS, 0.8): return False
+        if _flow_overlay_open(): return True
+        _t.sleep(0.5)
+    return _flow_overlay_open()
+
+def _flow_wait_closed(timeout=5.0):
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        if not _flow_overlay_open(): return True
+        _t.sleep(0.2)
+    return False
+
+def _flow_upload(path):
+    """Set files on the picker's hidden input. The node is re-created per open, so
+    resolve it fresh; a stale nodeId raises 'Could not find node with given id'."""
+    doc = cdp("DOM.getDocument", depth=-1)
+    nid = cdp("DOM.querySelector", nodeId=doc["root"]["nodeId"], selector="input[type=file]")["nodeId"]
+    if not nid: raise RuntimeError("flow: picker file input not found")
+    cdp("DOM.setFileInputFiles", files=[path] if isinstance(path, str) else list(path), nodeId=nid)
+
+def _flow_select_upload(name, timeout=25.0):
+    """Wait for the freshly uploaded asset to settle, then select it.
+
+    The picker does NOT auto-select a new upload: whatever was selected before stays
+    selected. Adding without selecting first attaches the previous asset, which Flow
+    dedupes against the chip already in the prompt — a no-op that looks like success.
+    The list is newest-first and can hold earlier uploads with the same filename, so
+    the first non-uploading match is the right one.
+    """
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        state = js(f"""(()=>{{const items=[...document.querySelectorAll('.cdk-overlay-pane .asset-item')];
+          const i=items.findIndex(x=>((x.innerText||'').includes({_json.dumps(name)})));
+          if(i<0)return 'absent';
+          if(/Uploading/i.test(items[i].innerText||''))return 'uploading';
+          if(/active/.test(items[i].className))return 'active';
+          const r=items[i].getBoundingClientRect();
+          window.__bhp={{x:r.x+r.width/2,y:r.y+r.height/2}};return 'ready';}})()""")
+        if state == "active": return True
+        if state == "ready":
+            p = js("window.__bhp")
+            if p: click_at_xy(p["x"], p["y"]); _t.sleep(0.6)
+            continue
+        _t.sleep(0.5)
+    return False
+
+def flow_set_prompt(text, clear_first=True, typing_delay=0.02):
+    """Type `text` into the Flow prompt box.
+
+    The editor is ProseMirror: assigning textContent or a JS Range selection is
+    ignored, so this focuses it and sends real key events. clear_first selects all
+    and deletes through the keyboard for the same reason.
+    """
+    if not js(f"!!document.querySelector({_FLOW_EDITOR!r})"):
+        raise RuntimeError("flow_set_prompt: prompt box not found — is the Flow project page loaded?")
+    js(f"(()=>{{const e=document.querySelector({_FLOW_EDITOR!r});e.focus();e.click();}})()"); _t.sleep(0.25)
+    if clear_first:
+        ua = cdp("Browser.getVersion").get("userAgent", "")
+        mods = 4 if ("Mac OS X" in ua or "Macintosh" in ua) else 2
+        sa = {"key": "a", "code": "KeyA", "modifiers": mods,
+              "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65, "commands": ["SelectAll"]}
+        cdp("Input.dispatchKeyEvent", type="rawKeyDown", **sa)
+        cdp("Input.dispatchKeyEvent", type="keyUp", **{k: v for k, v in sa.items() if k != "commands"})
+        _t.sleep(0.2)
+        cdp("Input.dispatchKeyEvent", type="rawKeyDown", key="Backspace", code="Backspace",
+            windowsVirtualKeyCode=8, nativeVirtualKeyCode=8)
+        cdp("Input.dispatchKeyEvent", type="keyUp", key="Backspace", code="Backspace",
+            windowsVirtualKeyCode=8, nativeVirtualKeyCode=8)
+        _t.sleep(0.2)
+    type_text(text, typing_delay=typing_delay)
+    _t.sleep(0.3)
+    got = _flow_editor_text()
+    return {"ok": text in (got or ""), "text": got}
+
+def flow_attach_ingredients(paths):
+    """Upload local files and add them to the prompt box as reference ingredients.
+
+    `paths`: one path or a list. Images (.png/.jpg/.jpeg/.webp/.gif/.heif/.heic) and
+    videos (.mp4/.m4v/.mov/.3gp/.avi) are accepted. The picker selects one asset at a
+    time, so each path is uploaded and attached separately. At most four ingredients
+    can be attached.
+
+    Returns {"ok", "attached", "chips", "errors", "warnings"}.
+    """
+    paths = [paths] if isinstance(paths, str) else [str(p) for p in paths]
+    errors, warnings = [], []
+    missing = [p for p in paths if not _os.path.exists(p)]
+    if missing: raise ValueError(f"flow_attach_ingredients: file not found: {missing}")
+    while _flow_chips() + len(paths) > _FLOW_MAX_INGREDIENTS:
+        dropped = paths.pop()
+        warnings.append(f"{dropped}: Flow accepts at most {_FLOW_MAX_INGREDIENTS} ingredients; not attached")
+    before = _flow_chips()
+    for p in paths:
+        try:
+            if not _flow_open_picker():
+                errors.append(f"{p}: ingredients picker did not open"); break
+            if not _flow_click_js(_UPLOAD_MEDIA, 1.0):
+                errors.append(f"{p}: Upload media button not found"); break
+            _flow_upload(p)
+            if not _flow_select_upload(_os.path.basename(p)):
+                errors.append(f"{p}: upload did not settle in the picker"); continue
+            n_before = _flow_chips()
+            if not _flow_click_js(_ADD_TO_PROMPT, 1.6):
+                errors.append(f"{p}: Add to prompt not found"); continue
+            _flow_wait_closed()
+            if _flow_chips() <= n_before:
+                errors.append(f"{p}: not added (Flow may treat it as a duplicate)")
+        except Exception as e:
+            errors.append(f"{p}: {type(e).__name__}: {e}")
+            # Leave the picker closed so the next attempt starts clean.
+            try: js("document.body.click()"); _t.sleep(0.4)
+            except Exception: pass
+    return {"ok": not errors, "attached": _flow_chips() - before,
+            "chips": _flow_chips(), "errors": errors, "warnings": warnings}
+
+def flow_clear_ingredients():
+    """Remove every ingredient chip from the prompt box. Returns chips removed."""
+    n = 0
+    while _flow_chips():
+        if not _flow_click_js("document.querySelector('flow-ingredient-chip button.chip-container')", 0.7):
+            break
+        n += 1
+        if n > 10: break
+    return n
+
+def flow_compose_prompt(prompt, refs=None, clear_refs=False):
+    """Set the prompt text and attach reference files in one call.
+
+    `prompt`: the text to generate from.
+    `refs`:   local image/video paths to attach as ingredients (max 4 total).
+    `clear_refs`: drop existing ingredient chips first, so `refs` is exactly the set.
+
+    Returns {"ok", "prompt", "ingredients", "errors", "warnings"}.
+    """
+    if clear_refs: flow_clear_ingredients()
+    text = flow_set_prompt(prompt)
+    ing = flow_attach_ingredients(refs) if refs else {"ok": True, "attached": 0, "chips": _flow_chips(),
+                                                      "errors": [], "warnings": []}
+    return {"ok": bool(text["ok"] and ing["ok"]), "prompt": text["text"],
+            "ingredients": ing["chips"], "errors": ing["errors"], "warnings": ing["warnings"]}

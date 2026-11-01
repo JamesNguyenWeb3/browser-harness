@@ -72,3 +72,58 @@ Treat `ok: False` or a non-empty `warnings` as "the panel is not what you asked 
 - Applies to the prompt-box settings only. It does not type the prompt or start generation (`Start generation`, `aria-label="Start generation"`).
 - Do not click Settings, Home, or project-level buttons as part of this.
 - The panel is transient: if another action happens between calls it may be closed. The helper re-opens it itself.
+
+---
+
+# Prompt and reference ingredients
+
+Field-tested against `flow.google.com/project/344ca08e-cbf4-4588-9029-be9eab5b6dbb` on 2026-11-01.
+Primitives: `flow_compose_prompt()`, `flow_set_prompt()`, `flow_attach_ingredients()`, `flow_clear_ingredients()`.
+
+## Quick summary
+
+- The prompt box is `<flow-rich-text-editor>` wrapping a ProseMirror `contenteditable` (`flow-rich-text-editor .ProseMirror`).
+- **ProseMirror ignores JS edits.** Setting `textContent`, `innerHTML`, or a Range + `Selection` does not change the prompt. Text must go in through real key events — `type_text()` works, and clearing needs the keyboard Select-All then Backspace.
+- References are **not** inside the editor. Each becomes a `<flow-ingredient-chip>` beside it, with an `<img class="chip-image">`.
+- **Flow accepts at most 4 ingredients.** The picker silently stops adding past four; the helpers warn instead of failing.
+- The upload input is `input[type=file]` with `accept=".png,.jpg,.jpeg,.webp,.gif,.heif,.heic,.mp4,.m4v,.mov,.3gp,.avi"` and `multiple`. It exists only while the picker is open, and a fresh node is created each time — resolve it per upload or CDP answers `Could not find node with given id`.
+
+## The one-call case
+
+```python
+flow_compose_prompt(
+    "Character A stands in a rain-soaked alley, neon signs on wet asphalt.",
+    refs=["/path/to/characterA.png"],
+    clear_refs=True,
+)
+# -> {'ok': True, 'prompt': '...', 'ingredients': 1, 'errors': [], 'warnings': []}
+```
+
+`clear_refs=True` drops existing chips first, so `refs` is exactly the attached set. Use it whenever the reference list matters — otherwise chips from a previous task stay attached.
+
+Reading a request like *"generate for me image of character A (ref A is in /path/to/characterA.png) doing …"*:
+
+1. `generate_setting_trigger(generate_type="Image", ...)` for the mode and format.
+2. `flow_compose_prompt(prompt, refs=["/path/to/characterA.png"], clear_refs=True)` to type the prompt and attach the reference.
+3. Only then start generation. The primitives never click **Start generation**.
+
+## How attaching works, and why it surprised me
+
+Per file: open picker → **Upload media** → set the file input → wait for the item to leave "Uploading" → **select that item** → **Add to prompt** → wait for the picker to close.
+
+Two traps, both of which produced silent no-ops before they were fixed:
+
+- **The picker does not auto-select a new upload.** Whatever was selected before stays selected, so adding without selecting attaches the *previous* asset. Flow dedupes it against the chip already in the prompt and the count does not move.
+- **"Uploading" can persist for many seconds**, and the recents list can already contain earlier uploads with the same filename. Selection therefore waits for the first match that is not uploading, then clicks it by name.
+
+The helpers treat "Add to prompt clicked but chip count did not rise" as an error, so a dedupe no longer reports success.
+
+## Removing references
+
+`flow_clear_ingredients()` clicks each chip's remove control and returns how many it removed. There is no per-file removal by name; clear and re-attach.
+
+## Limits
+
+- Does not type into or start generation; does not edit the video itself.
+- Requires the project page to render: a missing project redirects to `/404?reason=project` with "Project not found", and every primitive raises rather than guessing.
+- Uploading large videos is slow; the settle wait is 25 s per file before it reports an error.

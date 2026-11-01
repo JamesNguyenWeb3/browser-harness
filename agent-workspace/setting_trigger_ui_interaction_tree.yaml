@@ -340,3 +340,24 @@ setting_trigger:
 #  }, null, 2));
 #  console.log("Copied element metadata to clipboard!");
 #})();
+
+
+{
+  "tag": "button",
+  "ariaLabel": "Add ingredients to the prompt box",
+  "role": null,
+  "id": null,
+  "selector": null,
+  "inShadowRoot": false
+}
+
+
+{
+  "tag": "flow-rich-text-editor",
+  "text": "What do you want to create?",
+  "ariaLabel": null,
+  "role": null,
+  "id": null,
+  "selector": null,
+  "inShadowRoot": false
+}
