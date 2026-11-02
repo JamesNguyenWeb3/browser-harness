@@ -18,41 +18,59 @@ description.
 
 ## Pick the primitive per reference
 
-| Reference is | Use | Ends up as |
-| --- | --- | --- |
-| a local file | `flow_attach_ingredients([path])` | chip |
-| already an image/video in the project | `flow_attach_assets("name")` | chip |
-| a character | mention it: `("mention", "Lisa")` | chip + inline name |
-| missing, must be made | `flow_generate` first, then reference it | chip |
-| several of the above | `flow_compose_scene(...)` | all of it, verified |
+## Name every reference
 
-## The workflow
+A chip carries an **asset name**, and an `@mention` resolves **by name**. Upload a file
+as `lisa_ref.png` and the prompt's `{Lisa}` cannot find it: the chip sits attached while
+the prompt names something else, so the reference is wasted and the scene is wrong.
 
-`flow_compose_scene` runs the whole thing. Use it unless you need to inspect a step.
+The fix is to make the two identities one: **upload, then rename the asset to the
+variable the prompt uses.** `flow_compose_scene` does this for you.
 
 ```python
 flow_compose_scene(
-    "A studio fashion sequence. {Lisa} holds {RedMud}, lit from the left.",
-    references=["/path/to/lisa_ref.png", "Lisa", {"generate": "a red clay jar", "as": "clay jar"}],
+    "A studio sequence. {Lisa} holds {RedMud}, lit from the left.",
+    references=[
+        {"as": "Lisa",   "path": "/path/to/lisa_ref.png"},   # upload, rename to Lisa
+        {"as": "RedMud", "asset": "red clay jar"},           # existing asset, renamed
+    ],
 )
-# {'ok': True, 'text': '… Lisa holds …', 'chips': 4, 'mentions': 2,
-#  'references': ['lisa_ref.png', 'Lisa', 'clay jar'], 'errors': [], 'warnings': []}
+# {'ok': True, 'text': '… Lisa holds RedMud …', 'chips': 2, 'mentions': 2,
+#  'expected_chips': 2, 'variables': ['Lisa', 'RedMud'], 'errors': [], 'warnings': []}
 ```
 
-1. **Inventory.** List every reference and its type, then compress until the prompt
-   still reads as one sentence.
-   *Done when:* every reference has a type, and each one earns its place.
-2. **Resolve — make each one real.** Local files upload, missing ones generate, existing
-   ones are found by name.
-   *Done when:* every reference exists either as a local path that uploads or a name
-   that appears in the picker.
-3. **Compose — write the prompt.** `{name}` markers become mentions; everything else is
-   attached.
-   *Done when:* returned `chips` equals your reference count and `mentions` equals the
-   number of named references.
-4. **Generate, then download.** `flow_generate` with the same references already in
-   place, then `flow_download`.
+Each reference says what it fills (`as`) and where it comes from:
+
+| Reference | Source | Becomes |
+| --- | --- | --- |
+| `{"as": "Lisa", "path": "/p/Lisa.png"}` | local file | uploaded, renamed to `Lisa` |
+| `{"as": "RedMud", "asset": "red clay jar"}` | project asset | renamed to `RedMud` if the name differs |
+| `{"as": "Osei", "character": "Osei"}` | character | mentioned under its own name |
+| `{"as": "Jar", "generate": "a red clay jar"}` | generated | generated, then renamed to `Jar` |
+| `"Stone"` | project asset | used as-is, mentioned as `Stone` |
+| `"/p/Stone.png"` | local file | used as-is, mentioned as `Stone.png` |
+
+Every variable in the list gets a mention, so `mentions == chips == len(variables)`.
+`flow_rename_asset(old, new)` is the standalone rename when you want it outside a scene.
+
+**Renaming changes the asset in the project.** If the same asset is used by another
+scene by its old name, that name is gone — prefer `as` equal to the existing name for
+shared assets.
+
+## The workflow
+
+1. **Inventory.** List every reference, and the variable the prompt will call it by.
+   Compress until the prompt still reads as one sentence.
+   *Done when:* every reference has an `as` name and a source.
+2. **Resolve.** Upload, generate, or find each one, then rename it to its variable.
+   *Done when:* every variable is an asset name that exists in the project.
+3. **Compose.** `{name}` markers become mentions of those variables.
+   *Done when:* returned `variables` holds every name, and `mentions` equals its length.
+4. **Generate, then download.** `flow_generate`, then `flow_download`.
    *Done when:* `assets` holds at least one entry and `path` names a file.
+
+Check `ok` before generating: it requires the attachments to match `expected_chips` and
+no errors, which is what catches a reference whose rename or mention did not land.
 
 ## Compress by choosing the unit
 

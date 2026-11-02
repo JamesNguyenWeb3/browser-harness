@@ -1460,61 +1460,103 @@ def flow_attach_assets(names, timeout=20.0):
 
 def flow_compose_scene(parts, references=(), clear_refs=True, generate_type="image",
                        timeout=300.0, **settings):
-    """Compose a prompt whose references are uploaded, generated, or already present.
+    """Compose a prompt whose references are named variables.
 
-    parts:       prompt parts, as in flow_set_prompt_with_mentions — literal strings
-                 and ("mention", name). A plain string may also contain "{name}"
-                 markers, which are replaced by a mention of that reference.
-    references:  list of items; each one of
-                   "/path/to/file.png"                     local file, uploaded as a chip
-                   "Asset name"                            existing project asset, mentioned
-                   {"generate": "prompt", "as": "Term"}    generate it first, mention as Term
-                 `as` must be a substring of the generated asset's name, which Flow
-                 derives from the generate prompt — a distinctive word from it works.
-    clear_refs:  drop existing chips first, so the scene holds exactly these references.
+    Each reference says what it fills and where it comes from, and is then made to
+    answer to that variable name, so every {name} in the prompt is a mention of a
+    chip that actually exists.
 
-    There is no hard reference limit; past _FLOW_REFERENCE_WARN the result carries a
-    warning, because the model's own limits and the prompt budget start to bite.
+        {"as": "Lisa",   "path": "/path/to/Lisa.png"}   upload, rename to "Lisa"
+        {"as": "RedMud", "asset": "red clay jar"}       existing asset, renamed if the
+                                                        name differs
+        {"as": "Osei",   "character": "Osei"}           existing character
+        {"as": "Jar",    "generate": "a red clay jar"}  generate, then rename to "Jar"
+        "Lisa"                                          existing asset used as-is
+        "/path/to/Lisa.png"                             uploaded under its filename
 
-    Returns {"ok", "text", "chips", "mentions", "references", "errors", "warnings"}.
+    parts:      prompt parts. A string with {name} markers becomes mentions; a list may
+                mix literal strings and ("mention", name) tuples.
+    clear_refs: drop existing chips first, so the scene holds exactly these references.
+
+    Why renaming matters: an uploaded file keeps its filename, so "{Lisa}" would not
+    find it and the chip would sit unused — a reference the prompt never mentions.
+    Renaming makes the chip and the mention the same identity.
+
+    Returns {"ok", "text", "chips", "mentions", "expected_chips", "variables",
+             "errors", "warnings"}. `ok` requires chips >= expected_chips (one per
+    distinct variable) and no errors, including a variable missing from the prompt.
     """
-    refs = [r if isinstance(r, dict) else {"value": r} for r in references]
-    errors, warnings, resolved = [], [], []
+    def normalize(item):
+        if isinstance(item, dict): return dict(item)
+        v = str(item)
+        return ({"path": v, "as": _os.path.basename(v)} if _os.path.exists(v)
+                else {"asset": v, "as": v})
+
+    refs = [normalize(r) for r in references]
+    errors, warnings = [], []
     if len(refs) > _FLOW_REFERENCE_WARN:
         warnings.append(f"{len(refs)} references is a lot; the model may not use all of them")
-    files = [r["value"] for r in refs if "value" in r and _os.path.exists(str(r["value"]))]
     for r in refs:
-        if "value" in r and not _os.path.exists(str(r["value"])):
-            warnings.append(f"{r['value']!r} is not a local file; treated as an asset name")
+        if not any(k in r for k in ("path", "asset", "character", "generate")):
+            errors.append(f"{r!r}: needs one of path, asset, character, generate")
 
     if clear_refs:
         flow_clear_ingredients()
 
-    if files:
-        r = flow_attach_ingredients(files)
-        errors.extend(r["errors"]); warnings.extend(r["warnings"])
-
-    mentioned = []
+    # 1. Local files: upload once, then rename each to its variable name.
+    variables = []
+    uploads = []
     for r in refs:
-        if "generate" in r:
+        if not r.get("path"): continue
+        if not _os.path.exists(str(r["path"])):
+            errors.append(f"{r['path']}: local file not found"); continue
+        uploads.append((r["path"], r.get("as") or _os.path.basename(r["path"])))
+    if uploads:
+        res = flow_attach_ingredients([p for p, _ in uploads])
+        errors.extend(res["errors"]); warnings.extend(res["warnings"])
+        for path, name in uploads:
+            base = _os.path.basename(path)
+            renamed = base == name or flow_rename_asset(base, name)
+            if not renamed:
+                warnings.append(f"{base}: could not rename to {name!r}; mention it as {base!r}")
+            variables.append(name if renamed else base)
+
+    # 2. Variables resolved by name.
+    for r in refs:
+        if r.get("generate"):
             gen = flow_generate(prompt=r["generate"], generate_type=generate_type,
                                 timeout=timeout, **settings)
-            if not gen["ok"]:
+            if not gen["ok"] or not gen["assets"]:
                 errors.append(f"generate {r['generate']!r}: {'; '.join(gen['errors']) or 'failed'}")
                 continue
-            term = r.get("as") or " ".join(r["generate"].split()[:4])
-            mentioned.append(term); resolved.append(term)
-        elif "value" in r:
-            v = str(r["value"])
-            if _os.path.exists(v): resolved.append(_os.path.basename(v))
-            else: mentioned.append(v); resolved.append(v)
+            current = _flow_asset_name(gen["assets"][0]["id"])
+            want = r.get("as")
+            if want and current and current != want:
+                if not flow_rename_asset(current, want):
+                    warnings.append(f"generated asset stayed {current!r}; mention it as such")
+                    want = current
+            variables.append(want or current)
+        elif r.get("character"):
+            name = r.get("as") or r["character"]
+            if name != r["character"]:
+                warnings.append(f"characters keep their own name; {name!r} resolves as "
+                                f"{r['character']!r}")
+            variables.append(r["character"])
+        elif r.get("asset"):
+            name = r.get("as") or r["asset"]
+            if name != r["asset"] and not flow_rename_asset(r["asset"], name):
+                warnings.append(f"{r['asset']!r}: could not rename to {name!r}; "
+                                f"using the asset name")
+                name = r["asset"]
+            variables.append(name)
+    variables = [v for v in variables if v]
 
-    if parts and isinstance(parts, str):
-        parts = [parts]
-    # Replace {name} markers with mention tuples so the prompt names each reference.
+    # 3. Write the prompt; every variable becomes a mention.
+    if isinstance(parts, str): parts = [parts]
     expanded = []
     for part in parts or []:
-        if not isinstance(part, str): expanded.append(part); continue
+        if not isinstance(part, str):
+            expanded.append(part); continue
         out, rest = [], part
         while "{" in rest and "}" in rest:
             head, _, tail = rest.partition("{")
@@ -1524,24 +1566,82 @@ def flow_compose_scene(parts, references=(), clear_refs=True, generate_type="ima
         if rest: out.append(rest)
         expanded.extend(out)
 
-    text = flow_set_prompt_with_mentions(expanded) if expanded else {"ok": True, "text": _flow_editor_text()}
-    errors.extend(text["errors"])
-    # References that are chips only still need attaching; mention them when they are
-    # not already covered by a {name} marker in the prompt.
-    pending = [m for m in mentioned if ("mention", m) not in expanded]
-    for name in pending:
+    text = (flow_set_prompt_with_mentions(expanded) if expanded
+            else {"ok": True, "text": _flow_editor_text(), "errors": []})
+    errors.extend(text.get("errors") or [])
+
+    # A variable the prompt never names still has to be attached: mention it.
+    covered = {p[1] for p in expanded if isinstance(p, tuple)}
+    for name in [v for v in variables if v not in covered]:
         try: flow_mention(name)
         except RuntimeError as e: errors.append(str(e))
 
     state = _flow_mention_state()
     chips = _flow_chips()
-    # One chip per distinct reference. `resolved` holds each reference's identity —
-    # the uploaded filename, the asset name, or the generate term — so duplicates that
-    # Flow dedupes count once and the check still holds.
-    expected = len({str(x).strip().lower() for x in resolved})
+    expected = len({str(v).strip().lower() for v in variables})
     if chips < expected:
         errors.append(f"{expected} references expected but {chips} are attached")
-    return {"ok": not errors and state["mentions"] >= len(mentioned) and chips >= expected,
+    return {"ok": not errors and chips >= expected,
             "text": state["text"], "chips": chips, "mentions": state["mentions"],
-            "expected_chips": expected, "references": resolved,
+            "expected_chips": expected, "variables": variables,
             "errors": errors, "warnings": warnings}
+
+def _flow_tile_menu_for(asset_name):
+    """Centre of the More-options button on the tile whose named button matches."""
+    return js(f"""(()=>{{const want={_json.dumps(asset_name)};
+      for(const t of document.querySelectorAll('flow-tile-container')){{
+        const named=[...t.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')===want);
+        if(!named)continue;
+        const m=t.querySelector('button[aria-label="More options"]');
+        if(!m)continue;const r=m.getBoundingClientRect();
+        return {{x:r.x+r.width/2,y:r.y+r.height/2}};}}
+      return null;}})()""")
+
+def _flow_asset_name(asset_id):
+    """Current display name of the tile carrying `asset_id`."""
+    return js(f"""(()=>{{const want={_json.dumps(asset_id)};
+      for(const t of document.querySelectorAll('flow-tile-container')){{
+        const mid=t.querySelector('[data-media-id]');
+        if(!mid||mid.getAttribute('data-media-id')!==want)continue;
+        const named=[...t.querySelectorAll('button')].map(b=>b.getAttribute('aria-label'))
+          .filter(a=>a&&a!=='Favorite'&&a!=='More options');
+        return named[0]||null;}}
+      return null;}})()""")
+
+def flow_rename_asset(old_name, new_name):
+    """Rename a project asset so a mention can resolve to it. Returns True on success."""
+    try:
+        return _flow_rename_asset(old_name, new_name)
+    finally:
+        try: _flow_close_menus()
+        except Exception: pass
+
+def _flow_rename_asset(old_name, new_name):
+    if old_name == new_name: return True
+    _flow_close_menus()
+    pos = _flow_tile_menu_for(old_name)
+    if not pos: return False
+    click_at_xy(pos["x"], pos["y"]); _t.sleep(1.2)
+    if not _flow_click_js("[...document.querySelectorAll('[role=menuitem]')].find(x=>/Rename/i.test(x.innerText))", 1.4):
+        _flow_close_menus(); return False
+    _t.sleep(0.9)
+    field = js(f"""(()=>{{const i=[...document.querySelectorAll('input')]
+      .find(x=>x.value==={_json.dumps(old_name)});
+      if(!i)return null;const r=i.getBoundingClientRect();
+      return {{x:r.x+r.width/2,y:r.y+r.height/2}};}})()""")
+    if not field:
+        _flow_close_menus(); return False
+    click_at_xy(field["x"], field["y"]); _t.sleep(0.3)
+    ua = cdp("Browser.getVersion").get("userAgent", "")
+    mods = 4 if ("Mac OS X" in ua or "Macintosh" in ua) else 2
+    sa = {"key": "a", "code": "KeyA", "modifiers": mods,
+          "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65, "commands": ["SelectAll"]}
+    cdp("Input.dispatchKeyEvent", type="rawKeyDown", **sa)
+    cdp("Input.dispatchKeyEvent", type="keyUp", **{k: v for k, v in sa.items() if k != "commands"})
+    _t.sleep(0.2)
+    press_key("Backspace"); _t.sleep(0.2)
+    type_text(new_name, typing_delay=0.03); _t.sleep(0.3)
+    press_key("Enter"); _t.sleep(1.6)
+    return bool(js(f"""(()=>{{for(const t of document.querySelectorAll('flow-tile-container')){{
+        if([...t.querySelectorAll('button')].some(b=>b.getAttribute('aria-label')==={_json.dumps(new_name)}))return true;}}
+      return false;}})()"""))

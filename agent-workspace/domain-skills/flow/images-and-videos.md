@@ -109,6 +109,9 @@ Measured behaviour worth knowing:
 - **A mention adds a chip.** `flow_set_prompt(clear_first=True)` clears the text and
   the mention spans but leaves those chips — call `flow_clear_ingredients()` too when
   resetting.
+- **A mention resolves by asset name.** An uploaded file keeps its filename, so
+  `{Lisa}` will not find `lisa_ref.png`; rename it with `flow_rename_asset` or let
+  `flow_compose_scene` do it — see `many-references.md`.
 - Search filters the active picker tab only (All / Images / Videos / Voices /
   Characters / Avatars).
 

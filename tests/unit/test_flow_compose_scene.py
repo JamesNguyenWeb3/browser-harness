@@ -59,6 +59,17 @@ def flow(tmp_path):
         return name
 
     mod.flow_mention = mention
+    renames = []
+    mod._renames = renames
+
+    def rename(old, new):
+        renames.append((old, new))
+        return rename_succeeds
+
+    rename_succeeds = {"value": True}
+    mod._rename_succeeds = rename_succeeds
+    mod.flow_rename_asset = lambda old, new: (renames.append((old, new)), rename_succeeds["value"])[1]
+    mod._flow_asset_name = lambda asset_id: "generated_slug"
     mod._state = state
 
     ref = tmp_path / "refA.png"
@@ -114,3 +125,21 @@ def test_many_references_are_not_capped(flow):
             Path(r).unlink(missing_ok=True)
     assert out["expected_chips"] == 7
     assert out["ok"] is True
+
+
+def test_named_variable_is_renamed_to_match_the_prompt(flow):
+    """A path reference is uploaded, then renamed so {Alpha} resolves to it."""
+    flow._state.update(chips=1, mentions=1, text="Alpha appears")
+    r = flow.flow_compose_scene("Scene: {Alpha}.", references=[{"as": "Alpha", "path": flow._ref}])
+    assert flow._renames == [("refA.png", "Alpha")]
+    assert r["variables"] == ["Alpha"]
+    assert r["ok"] is True
+
+
+def test_rename_failure_is_reported(flow):
+    """If the asset cannot be renamed, the variable does not resolve — say so."""
+    flow._rename_succeeds["value"] = False
+    flow._state.update(chips=1, mentions=1, text="refA.png appears")
+    r = flow.flow_compose_scene("Scene: {Alpha}.", references=[{"as": "Alpha", "path": flow._ref}])
+    assert r["variables"] == ["refA.png"]
+    assert any("could not rename" in w for w in r["warnings"])

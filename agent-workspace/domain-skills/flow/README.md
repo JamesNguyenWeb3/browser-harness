@@ -54,6 +54,7 @@ Compose by hand when you want to inspect each step.
 | `flow_compose_prompt` | text + reference files, one call |
 | `flow_compose_scene` | several references of mixed kinds, capped and verified |
 | `flow_attach_ingredients` / `flow_attach_assets` / `flow_clear_ingredients` | reference files, or project assets by name |
+| `flow_rename_asset` | rename an asset so a mention resolves to it |
 | `flow_set_prompt_with_mentions` / `flow_mention` / `flow_clear_mentions` | inline `@` references inside the text |
 | `flow_set_frames` / `flow_clear_frames` | first/last frame slots for Frames-mode video |
 | `flow_create_character` / `flow_set_character_voice` | characters and their voices |
