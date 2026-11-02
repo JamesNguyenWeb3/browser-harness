@@ -344,3 +344,64 @@ duration are separate choices — and raises if the slots are absent.
 
 `flow_clear_frames()` clicks each filled slot's remove control and returns how many it
 emptied; the Start/End labels come back.
+
+---
+
+# Running a generation and reading the result
+
+Field-tested against `flow.google.com/project/e23b42bb-…` on 2026-11-01.
+Primitives: `flow_generate()`, `flow_list_results()`.
+
+## Quick summary
+
+```python
+flow_generate(
+    prompt="a ceramic bowl of lemons on linen, soft window light",
+    generate_type="image", aspect_ratio="1:1", model="nano banana 2.1", output_count=1,
+)
+# -> {'ok': True, 'kind': 'image', 'elapsed': 26.1,
+#     'assets': [{'id': '50aa573c-…', 'kind': 'image', 'url': 'https://flow-content.google/image/50aa573c-…'}],
+#     'errors': []}
+```
+
+`flow_generate` optionally configures settings, sets the prompt / refs / mentions /
+frames, clicks **Start generation**, and waits for the result. `flow_list_results()`
+returns what is currently in the media grid.
+
+## What the page does
+
+- **Start generation is disabled while the prompt box is empty.** The primitive raises
+  rather than clicking a dead button.
+- Results are **tiles in the media grid**, not in the prompt-box DOM, so `page_info()`
+  never shows them.
+- A run goes: button disables -> `flow-pending-tile` appears -> a percentage climbs ->
+  the pending tile becomes a result tile. Measured: image ~26 s, 4 s video ~34 s.
+- **The percentage is not a completion signal.** It can sit at 99% indefinitely while
+  the result is already usable. Completion is judged by a new asset id appearing *and*
+  no pending tile remaining.
+
+## Asset identity
+
+| Tile | Identity |
+| --- | --- |
+| Image | `data-media-id` on a descendant — the real asset UUID |
+| Image (fallback) | UUID inside the `flow-content.google/image/<uuid>` URL |
+| Video | **no `data-media-id`**; only a signed `flow.google.com/asb/…` thumbnail, so the id is `thumb:<segment>` — session-unique, not the real asset id |
+
+That asymmetry is why `flow_list_results()` reports `kind` per asset: a `thumb:` id is
+usable for "did something new appear" but should not be treated as a durable asset
+reference.
+
+## Feeding a result into the next call
+
+Image results carry a real UUID, which is the same id the pickers use, so a generated
+image can be referenced by name in a later `flow_set_frames` / `flow_attach_ingredients`
+call once it is visible in the picker. Video results do not expose a UUID in the grid.
+
+## Limits
+
+- No download/export primitive: results are identified, not saved to disk.
+- `flow_generate` waits for the *first* new asset; with `output_count > 1` it returns
+  whatever ids appeared by the time the pending tiles cleared.
+- A generation that fails server-side leaves no new asset and reports
+  `no new asset appeared after generation`.

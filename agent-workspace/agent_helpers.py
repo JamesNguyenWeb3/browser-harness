@@ -484,7 +484,6 @@ def flow_mention(name, clear_text="@", timeout=8.0):
 
     Raises RuntimeError when nothing matches, after removing the stray "@".
     """
-    before = _flow_mention_state()
     _flow_cursor_to_end()
     _t.sleep(0.2)
     type_text("@"); _t.sleep(1.2)
@@ -559,7 +558,6 @@ def flow_clear_mentions():
 
 _FLOW_CHAR_NAME = "input.name-input"
 _FLOW_CHAR_PERSONALITY = "textarea.personality-textarea"
-_FLOW_CHAR_DESC = "flow-rich-text-editor .ProseMirror, .ProseMirror"
 _FLOW_CHAR_VOICE_BTN = ("[...document.querySelectorAll('button')]"
                         ".find(x=>/voice_selection/.test(x.innerText))")
 _FLOW_CHAR_URL = "/character"
@@ -754,10 +752,9 @@ def flow_set_character_voice(preset=None, performance=None, name=None, sample=No
         if preview: click_at_xy(preview["x"], preview["y"])
         else: errors.append("Preview button not found")
 
-        saved = False
         save_btn = wait_enabled("Save new voice")
         if save_btn:
-            click_at_xy(save_btn["x"], save_btn["y"]); _t.sleep(1.5); saved = True
+            click_at_xy(save_btn["x"], save_btn["y"]); _t.sleep(1.5)
             # After saving, the panel offers Add to character.
             add = wait_enabled("Add to character", timeout_s=30.0)
             if add:
@@ -1005,3 +1002,166 @@ def flow_clear_frames():
         n += 1; _t.sleep(0.6)
         if n > 6: break
     return n
+
+# --- Google Flow: run a generation and read back the result ---
+# Results land as tiles in the media grid, not in the prompt-box DOM. Each asset's
+# id is the UUID in its flow-content URL (flow-content.google/image/<uuid>), which is
+# the same id the picker uses, so a result can be fed back into a later call.
+
+_FLOW_GEN_BTN = ("[...document.querySelectorAll('button')]"
+                 ".find(x=>x.getAttribute('aria-label')==='Start generation')")
+
+def _flow_asset_ids():
+    """{id: kind} for every asset tile in the media grid.
+
+    Identity, in order of reliability:
+      * `data-media-id` on a descendant — the real asset UUID (images have it);
+      * the UUID inside a flow-content URL;
+      * the thumbnail's last path segment — video tiles carry only a signed
+        flow.google.com/asb thumbnail and no data-media-id, so this is a
+        session-unique stand-in, not the asset's real id.
+    """
+    return js("""(()=>{const out={};
+      for(const t of document.querySelectorAll('flow-tile-container')){
+        const kind=t.querySelector('flow-video-tile')?'video':'image';
+        const mid=t.querySelector('[data-media-id]');
+        let id=mid?mid.getAttribute('data-media-id'):null;
+        if(!id){
+          const img=[...t.querySelectorAll('img')].find(i=>(i.src||'').indexOf('flow-content.google')>=0);
+          if(img){const parts=(img.src||'').split('/');
+            const k=parts.findIndex(x=>x==='image'||x==='video');
+            if(k>=0&&parts[k+1]) id=parts[k+1].split('?')[0];}
+        }
+        if(!id){
+          const img=t.querySelector('img');
+          if(img&&img.src){const seg=img.src.split('?')[0].split('/').pop();
+            if(seg) id='thumb:'+seg.slice(0,40);}
+        }
+        if(id) out[id]=kind;
+      }
+      return out;})()""") or {}
+
+def _flow_asset(key, kind):
+    """Build an asset record. Only a real UUID gets a resolvable flow-content URL;
+    a `thumb:` key is a session-unique stand-in for video tiles, so url is None
+    rather than a URL that would 404."""
+    if key.startswith("thumb:"):
+        return {"id": key, "kind": kind, "url": None, "durable_id": False}
+    return {"id": key, "kind": kind,
+            "url": f"https://flow-content.google/{kind}/{key}", "durable_id": True}
+
+def _flow_gen_state():
+    return js("""(()=>({pending:document.querySelectorAll('flow-pending-tile').length,
+      pct:(()=>{const m=document.body.innerText.match(/(\\d+)\\s*%/);return m?parseInt(m[1]):null;})()}))()""")
+
+def _flow_wait_generation(before_ids, timeout=300.0, settle=6.0):
+    """Wait until a generation started before this call has produced new assets.
+
+    Success is a new asset id appearing with no pending tile left. But pending tiles
+    can be stranded after the assets are already usable (seen at 99% and with
+    output_count>1), so a result set that stops changing is also accepted. The
+    percentage indicator is never trusted on its own.
+    """
+    start = _t.time()
+    _t.sleep(settle)
+    last_ids, stable_since = None, None
+    while _t.time() - start < timeout:
+        ids = _flow_asset_ids()
+        new = {k: v for k, v in ids.items() if k not in before_ids}
+        st = _flow_gen_state()
+        if new:
+            if st["pending"] == 0:
+                return {"ok": True, "new": new, "elapsed": round(_t.time() - start, 1)}
+            if ids == last_ids:
+                if stable_since is None:
+                    stable_since = _t.time()
+                elif _t.time() - stable_since >= 5.0:
+                    # Assets settled even though a pending tile never cleared.
+                    return {"ok": True, "new": new, "elapsed": round(_t.time() - start, 1),
+                            "stale_pending": st["pending"]}
+            else:
+                stable_since = None
+        elif st["pending"] == 0 and st["pct"] is None and _t.time() - start > settle + 10:
+            return {"ok": False, "new": {}, "elapsed": round(_t.time() - start, 1)}
+        last_ids = ids
+        _t.sleep(2.0)
+    return {"ok": False, "new": {}, "elapsed": round(_t.time() - start, 1), "timeout": True}
+
+def flow_generate(prompt=None, refs=None, mentions=None, frames=None, clear_refs=False,
+                  finalize=True, timeout=300.0, **settings):
+    """Configure (optionally), start a generation, and wait for the result.
+
+    prompt:   prompt text. Omit to use whatever is already in the box.
+    refs:     local image/video paths to attach as ingredients.
+    mentions: list of asset names to insert as @-mentions, interleaved with `prompt`
+              by writing "{{name}}" markers in the prompt text.
+    frames:   {"start": name, "end": name} for Frames-mode video.
+    settings: forwarded to generate_setting_trigger (generate_type, aspect_ratio,
+              model, output_count, video_type, video_resolution, video_duration).
+
+    Returns {"ok", "kind", "assets": [{"id","kind","url"}], "elapsed", "errors"}.
+
+    Raises RuntimeError when Start generation is disabled — that means the prompt box
+    is empty, and clicking a disabled button would silently do nothing.
+    """
+    errors = []
+    if settings:
+        r = generate_setting_trigger(**settings)
+        errors.extend(r["warnings"])
+    if frames:
+        r = flow_set_frames(start=frames.get("start"), end=frames.get("end"))
+        errors.extend(r["errors"])
+    if prompt is not None:
+        if mentions:
+            parts, rest = [], prompt
+            for name in mentions:
+                marker = "{{" + name + "}}"
+                if marker in rest:
+                    head, rest = rest.split(marker, 1)
+                    parts.extend([head, ("mention", name)])
+                else:
+                    parts.append(("mention", name))
+            if rest: parts.append(rest)
+            r = flow_set_prompt_with_mentions(parts)
+            errors.extend(r["errors"])
+        else:
+            r = flow_set_prompt(prompt)
+            if not r["ok"]: errors.append("prompt text did not land in the editor")
+    if refs:
+        r = flow_attach_ingredients(refs) if not clear_refs else (
+            flow_clear_ingredients() and flow_attach_ingredients(refs))
+        errors.extend(r["errors"]); errors.extend(r["warnings"])
+
+    enabled = js(f"""(()=>{{const b={_FLOW_GEN_BTN};return !!(b && !b.disabled);}})()""")
+    if not enabled:
+        raise RuntimeError("flow_generate: Start generation is disabled — the prompt box is empty")
+    before = _flow_asset_ids()
+    _flow_click_js(_FLOW_GEN_BTN, 1.5)
+    res = _flow_wait_generation(before, timeout=timeout)
+    if res.get("timeout"): errors.append(f"generation did not finish within {timeout:g}s")
+    elif not res["ok"] and not errors: errors.append("no new asset appeared after generation")
+
+    assets = [_flow_asset(k, v) for k, v in res["new"].items()]
+    if finalize and assets:
+        # Close a result preview if one opened, so the next call starts from the grid.
+        if js("!!document.querySelector('.cdk-overlay-pane')") and not _flow_overlay_is_picker():
+            js("(()=>{const b=[...document.querySelectorAll('.cdk-overlay-pane button')].find(x=>x.getAttribute('aria-label')==='Close');if(b)b.click();})()")
+            _t.sleep(0.6)
+    kinds = {a["kind"] for a in assets}
+    return {"ok": not errors, "kind": (kinds.pop() if len(kinds) == 1 else None),
+            "assets": assets, "elapsed": res.get("elapsed"), "errors": errors}
+
+def _flow_overlay_is_picker():
+    """The asset pickers all show a search box; a result preview does not."""
+    return bool(js("!!document.querySelector('.cdk-overlay-pane input.search-input')"))
+
+def flow_list_results(kind=None, limit=20):
+    """Assets currently rendered in the project's media grid, newest first.
+
+    kind: "image" | "video" | None for both.
+    Returns {"ok", "assets": [{"id","kind","url"}], "count"}.
+    """
+    ids = _flow_asset_ids()
+    want = str(kind).strip().lower() if kind else None
+    assets = [_flow_asset(k, v) for k, v in ids.items() if want is None or v == want]
+    return {"ok": True, "assets": assets[:limit], "count": len(assets)}
