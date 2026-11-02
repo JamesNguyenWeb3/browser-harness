@@ -344,17 +344,37 @@ setting_trigger:
 
 {
   "tag": "button",
-  "ariaLabel": "Add ingredients to the prompt box",
+  "text": "upload\nUpload",
+  "ariaLabel": null,
   "role": null,
   "id": null,
   "selector": null,
   "inShadowRoot": false
 }
 
+{
+  "tag": "button",
+  "text": "Portrait",
+  "ariaLabel": null,
+  "role": null,
+  "id": null,
+  "selector": null,
+  "inShadowRoot": false
+}
 
 {
-  "tag": "flow-rich-text-editor",
-  "text": "What do you want to create?",
+  "tag": "input",
+  "text": null,
+  "ariaLabel": "Character name",
+  "role": null,
+  "id": null,
+  "selector": null,
+  "inShadowRoot": false
+}
+
+{
+  "tag": "button",
+  "text": "Done",
   "ariaLabel": null,
   "role": null,
   "id": null,

@@ -211,18 +211,45 @@ Returns `{"ok", "name", "url", "voice", "image", "errors", "warnings"}`.
 | Prompt-only character | Yes |
 | Preset voice | Yes |
 | Custom voice from a performance description | Yes — Preview → Save new voice → Add to character |
-| Image **already in the project** as portrait | Yes, via **Add from project** |
-| Uploading a local image for a character | **No** — see below |
+| Image-only character (upload a local portrait) | Yes — see below |
+| Prompt + image together | Yes |
 
-**Upload is not driveable on the character page.** Both the `Upload` button and the
-media picker's `Upload media` open the OS file dialog and create no `input[type=file]`
-in the DOM (unlike the prompt-box picker, where the same button does). A CDP client
-can only set files on an input that exists. Upload the image first on the project
-page with `flow_attach_ingredients()`, then pass it by filename to
-`flow_create_character(image=...)`, which adds it through **Add from project**.
+## Uploading a local portrait
 
-The bare `Upload` button opening the OS dialog is a real capability gap, not a bug
-in the primitive.
+The character page's `Upload` button creates **no** `input[type=file]` in the DOM — it
+calls straight into the browser's file chooser, so `DOM.setFileInputFiles` has no node
+to target by selector. The way in is to intercept the dialog:
+
+```python
+cdp("Page.setInterceptFileChooserDialog", enabled=True)   # before the click
+# click Upload -> Page.fileChooserOpened carries params.backendNodeId
+cdp("DOM.setFileInputFiles", files=[path], backendNodeId=backendNodeId)
+cdp("Page.setInterceptFileChooserDialog", enabled=False)  # after
+```
+
+`_flow_upload_via_chooser()` wraps this. Interception is armed only for the click,
+because while it is on it suppresses every other file dialog on the page.
+
+Uploading an image opens the character editor directly and starts a portrait
+generation from it — no description text is needed, so **image-only characters work**:
+
+```python
+flow_create_character(name="Nadia", image="/path/to/portrait.png",
+                      voice_preset="Erinome")
+```
+
+Real workflow order: Upload → choose file → wait for the editor → set name →
+voice (optional) → Character info (optional) → Done.
+
+**Do not wait on the portrait tile's percentage.** It can sit at 99% indefinitely
+(`flow-pending-tile` -> `.loading-percentage`) while the name field, voice selector
+and Done are all already usable. Waiting for it to clear hangs the whole flow. The
+primitive waits for `input.name-input` instead.
+
+**The name field must be typed over, not assigned.** Clicking after clearing puts the
+caret inside the placeholder and typing inserts into it
+("Untitled chTest Namearacter"). Select the field with Cmd/Ctrl+A, backspace, type,
+then dispatch `change` and blur so the value commits.
 
 ## Custom voice state machine (the fiddly part)
 

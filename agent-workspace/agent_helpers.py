@@ -564,6 +564,38 @@ _FLOW_CHAR_VOICE_BTN = ("[...document.querySelectorAll('button')]"
                         ".find(x=>/voice_selection/.test(x.innerText))")
 _FLOW_CHAR_URL = "/character"
 
+def _flow_upload_via_chooser(click_js, path, timeout=15.0, quiet_after=1.5):
+    """Upload a local file through a button that opens the OS file dialog.
+
+    Buttons like the character page's "Upload" create no input[type=file] — they
+    call into the browser's file chooser directly, so DOM.setFileInputFiles has no
+    node to target. Intercepting the dialog gives the chooser's backend node, which
+    DOM.setFileInputFiles accepts. Returns True when the file was set.
+
+    Interception is enabled only for the click and disabled afterwards, because it
+    suppresses every other file dialog on the page while active.
+    """
+    drain_events()
+    cdp("Page.setInterceptFileChooserDialog", enabled=True)
+    try:
+        if not _flow_click_js(click_js, 0.6): return False
+        deadline = _t.time() + timeout
+        node = None
+        while _t.time() < deadline:
+            for ev in drain_events():
+                p = ev.get("params") or {}
+                if ev.get("method") == "Page.fileChooserOpened" and p.get("backendNodeId"):
+                    node = p["backendNodeId"]; break
+            if node: break
+            _t.sleep(0.4)
+        if not node: return False
+        cdp("DOM.setFileInputFiles", files=[path], backendNodeId=node)
+        _t.sleep(quiet_after)
+        return True
+    finally:
+        try: cdp("Page.setInterceptFileChooserDialog", enabled=False)
+        except Exception: pass
+
 def _flow_char_open_new():
     """Open the blank New character page from a project. Returns the URL."""
     if js(f"location.pathname.includes({_FLOW_CHAR_URL!r})"): return js("location.href")
@@ -574,18 +606,38 @@ def _flow_char_open_new():
     return js("location.href")
 
 def _flow_char_set_input(selector, value):
-    """Replace a plain input/textarea value. Framework-bound fields ignore a raw
-    `value` assignment, so set through the prototype setter and fire `input`."""
+    """Replace a plain input/textarea value with real keystrokes.
+
+    Clearing through the prototype setter empties the field, but clicking afterwards
+    puts the caret inside the placeholder text and typing inserts into it
+    ("Untitled chTest Namearacter"). Select the whole field with the keyboard and
+    type over it instead, which is also what a person does.
+    """
     ok = js(f"""(()=>{{const i=document.querySelector({selector!r});if(!i)return false;
-      const p=i instanceof HTMLTextAreaElement?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
-      Object.getOwnPropertyDescriptor(p,'value').set.call(i,'');
-      i.dispatchEvent(new Event('input',{{bubbles:true}}));
       const r=i.getBoundingClientRect();window.__bhp={{x:r.x+r.width/2,y:r.y+r.height/2}};return true;}})()""")
     if not ok: return False
     p = js("window.__bhp")
     click_at_xy(p["x"], p["y"]); _t.sleep(0.25)
+    ua = cdp("Browser.getVersion").get("userAgent", "")
+    mods = 4 if ("Mac OS X" in ua or "Macintosh" in ua) else 2
+    sa = {"key": "a", "code": "KeyA", "modifiers": mods,
+          "windowsVirtualKeyCode": 65, "nativeVirtualKeyCode": 65, "commands": ["SelectAll"]}
+    cdp("Input.dispatchKeyEvent", type="rawKeyDown", **sa)
+    cdp("Input.dispatchKeyEvent", type="keyUp", **{k: v for k, v in sa.items() if k != "commands"})
+    _t.sleep(0.2)
+    cdp("Input.dispatchKeyEvent", type="rawKeyDown", key="Backspace", code="Backspace",
+        windowsVirtualKeyCode=8, nativeVirtualKeyCode=8)
+    cdp("Input.dispatchKeyEvent", type="keyUp", key="Backspace", code="Backspace",
+        windowsVirtualKeyCode=8, nativeVirtualKeyCode=8)
+    _t.sleep(0.2)
     type_text(value, typing_delay=0.02); _t.sleep(0.4)
-    return js(f"document.querySelector({selector!r}).value") == value
+    got = js(f"document.querySelector({selector!r}).value")
+    if got == value:
+        # Commit: these fields save on blur/change, not on each keystroke.
+        js(f"""(()=>{{const i=document.querySelector({selector!r});
+          i.dispatchEvent(new Event('change',{{bubbles:true}}));i.blur();}})()""")
+        _t.sleep(0.3)
+    return got == value
 
 def _flow_char_wait_idle(timeout=180.0):
     """Wait until no generation-percentage indicator is on the page."""
@@ -635,23 +687,26 @@ def flow_set_character_voice(preset=None, performance=None, name=None, sample=No
             errors.append("voice search box not found")
         else:
             type_text(preset, typing_delay=0.02)
-        # While the list is still filtering, an intermediate row can carry the query
-        # text as its label (picking one stored the voice literally as "aoede").
-        # Wait for the row list to stop changing, and require an exact name match.
-        item, last = None, None
-        deadline = _t.time() + 8.0
+        # The panel renders a transitional row while the query is being applied: its
+        # label is the query itself, lowercased. Picking it stored a voice literally
+        # named "aoede"/"gacrux". Require a row whose name equals the preset exactly
+        # (case-insensitive) and that stays put across several polls before clicking.
+        want = preset.strip().lower()
+        item, stable, deadline = None, 0, _t.time() + 15.0
         while _t.time() < deadline:
-            rows = js("JSON.stringify([...document.querySelectorAll('.cdk-overlay-pane button')]"
-                      ".map(b=>b.innerText.trim().replace(/\\n/g,'|')).filter(t=>t.startsWith('voice_selection')))")
-            if rows == last and rows not in (None, "[]"): break
-            last = rows; _t.sleep(0.4)
-        _t.sleep(0.3)
-        item = js(f"""(()=>{{const want={preset.strip().lower()!r};
-          const it=[...document.querySelectorAll('.cdk-overlay-pane button')].find(b=>{{
-            const parts=b.innerText.trim().split('\\n').map(s=>s.trim());
-            return parts[1] && parts[1].toLowerCase()===want;}});
-          if(!it)return null;const r=it.getBoundingClientRect();
-          return {{x:r.x+r.width/2,y:r.y+r.height/2,name:it.innerText.trim().split('\\n')[1]}};}})()""")
+            found = js(f"""(()=>{{const want={want!r};
+              const it=[...document.querySelectorAll('.cdk-overlay-pane button')].find(b=>{{
+                const parts=(b.innerText||'').trim().split('\\n').map(x=>x.trim());
+                return parts[1] && parts[1].toLowerCase()===want;}});
+              if(!it)return null;const r=it.getBoundingClientRect();
+              return {{x:r.x+r.width/2,y:r.y+r.height/2,name:(it.innerText||'').trim().split('\\n')[1]}};}})()""")
+            if found:
+                stable += 1
+                item = found
+                if stable >= 3: break
+            else:
+                stable, item = 0, None
+            _t.sleep(0.5)
         if not item:
             errors.append(f"preset {preset!r} not found in the voice list")
         else:
@@ -764,27 +819,26 @@ def flow_create_character(name, prompt=None, image=None, personality=None,
     # before the character editor exists, so the blank page only opens the editor
     # via Start generation — which requires description text.
     if image:
-        # The character page has no DOM-reachable upload: "Upload" and the picker's
-        # "Upload media" both open the OS file dialog and create no input[type=file]
-        # (unlike the prompt box's picker). Reuse an image already in the project
-        # instead — upload it first with flow_attach_ingredients on the project page.
-        if not _flow_click_js("[...document.querySelectorAll('button')].find(x=>/Add from project/.test(x.innerText))", 1.4):
-            errors.append("Add from project button not found")
+        # Upload the local file straight through the OS file dialog. The "Upload"
+        # button creates no input[type=file], so the chooser is intercepted and the
+        # dialog's own node receives the file — this is what makes image-only
+        # characters possible without touching the project page.
+        if not _flow_upload_via_chooser(
+                "[...document.querySelectorAll('button')].find(x=>/^upload/.test((x.innerText||'').trim()))",
+                image):
+            errors.append(f"could not upload {image} through the file chooser")
         else:
-            name = _os.path.basename(image)
-            item = js(f"""(()=>{{const it=[...document.querySelectorAll('.cdk-overlay-pane .asset-item')]
-              .find(x=>(x.innerText||'').includes({_json.dumps(name)}));
-              if(!it)return null;const r=it.getBoundingClientRect();
-              return {{x:r.x+r.width/2,y:r.y+r.height/2}};}})()""")
-            if not item:
-                errors.append(f"{name} is not in this project; upload it on the project page first")
-                _flow_wait_closed()
-            else:
-                click_at_xy(item["x"], item["y"]); _t.sleep(1.4)
-                _flow_wait_closed()
+            # Uploading opens the character editor directly. Do NOT wait for the
+            # portrait tile's percentage to clear: it can sit at 99% indefinitely
+            # while the name field, voice and Done are all already usable. Wait for
+            # the editor instead.
+            deadline = _t.time() + timeout
+            while _t.time() < deadline and not js(f"!!document.querySelector({_FLOW_CHAR_NAME!r})"):
+                _t.sleep(1.0)
 
     if prompt:
-        # "Create portrait" only selects the mode; Start generation runs it.
+        # "Create portrait" only selects the mode; Start generation runs it. With an
+        # image the upload itself opened the editor, so the prompt edits that image.
         _flow_click_js("[...document.querySelectorAll('button')].find(x=>/Create portrait|Portrait/.test(x.innerText))", 1.0)
         started = js("""(()=>{const b=[...document.querySelectorAll('button')].find(x=>x.getAttribute('aria-label')==='Start generation');
           return !!(b && !b.disabled);})()""")
@@ -804,17 +858,6 @@ def flow_create_character(name, prompt=None, image=None, personality=None,
             errors.append("character name field did not accept the value")
         if personality and not _flow_char_set_input(_FLOW_CHAR_PERSONALITY, personality):
             warnings.append("personality field not found")
-        if image and not prompt:
-            # Portrait slot on the editor: upload there, which is the only path
-            # that adds an image without generating one.
-            _flow_click_js("[...document.querySelectorAll('button')].find(x=>/^upload$|Upload/.test((x.innerText||'')+x.getAttribute('aria-label')))", 1.0)
-            if js("!!document.querySelector('input[type=file]')"):
-                doc = cdp("DOM.getDocument", depth=-1)
-                nid = cdp("DOM.querySelector", nodeId=doc["root"]["nodeId"], selector="input[type=file]")["nodeId"]
-                cdp("DOM.setFileInputFiles", files=[image], nodeId=nid)
-                _t.sleep(3.0)
-            else:
-                warnings.append("portrait upload input not found")
     else:
         errors.append("character editor (name field) not found")
 
