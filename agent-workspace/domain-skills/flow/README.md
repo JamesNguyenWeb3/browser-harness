@@ -13,6 +13,8 @@ These files are surfaced by `goto_url()` for a `flow.google.com` project when
 - `characters.md` — create a character from a prompt and/or a portrait, with a voice
 - `video-frames.md` — first/last-frame video: an image per slot
 - `downloading.md` — pick the best tier the plan allows, write the file to disk
+- `many-references.md` — scenes needing several references: the four-reference cap,
+  compression, and how chips and mentions combine
 
 ## The pipeline
 
@@ -50,7 +52,8 @@ Compose by hand when you want to inspect each step.
 | `generate_setting_trigger` | image/video, model, ratio, count, video type, resolution, duration |
 | `flow_set_prompt` | put text in the prompt box |
 | `flow_compose_prompt` | text + reference files, one call |
-| `flow_attach_ingredients` / `flow_clear_ingredients` | reference files only |
+| `flow_compose_scene` | several references of mixed kinds, capped and verified |
+| `flow_attach_ingredients` / `flow_attach_assets` / `flow_clear_ingredients` | reference files, or project assets by name |
 | `flow_set_prompt_with_mentions` / `flow_mention` / `flow_clear_mentions` | inline `@` references inside the text |
 | `flow_set_frames` / `flow_clear_frames` | first/last frame slots for Frames-mode video |
 | `flow_create_character` / `flow_set_character_voice` | characters and their voices |

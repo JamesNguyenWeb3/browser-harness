@@ -65,7 +65,11 @@ flow_compose_prompt("Character A in a rain-soaked alley", refs=["/path/to/a.png"
 ```
 
 `refs` are local files: images `.png .jpg .jpeg .webp .gif .heif .heic`, videos
-`.mp4 .m4v .mov .3gp .avi`.
+`.mp4 .m4v .mov .3gp .avi`. References that already live in the project are attached by
+name with `flow_attach_assets("name")` instead of being re-uploaded.
+
+For a prompt that needs several references of mixed kinds, read `many-references.md` —
+it covers the four-reference ceiling, compression, and the verified workflow.
 
 - **Four references is the ceiling.** Flow stops adding past four; the primitive
   reports the extras in `warnings` rather than attaching them silently.

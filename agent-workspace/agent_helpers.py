@@ -452,8 +452,14 @@ def _flow_pick_from_popup(query=None, timeout=8.0):
 
     deadline = _t.time() + timeout
     while _t.time() < deadline:
-        item = js("""(()=>{const it=document.querySelector('.cdk-overlay-pane .asset-item');
-          if(!it)return null;const r=it.getBoundingClientRect();
+        # Prefer mentionable items. Clicking a VIDEO row commits and closes the
+        # picker without inserting a mention, so taking the first match silently
+        # produced nothing whenever a video outranked an image in the results.
+        item = js("""(()=>{const its=[...document.querySelectorAll('.cdk-overlay-pane .asset-item')];
+          if(!its.length)return null;
+          const score=x=>/Image|Character|Avatar|Voice/i.test(x.innerText)?2:(/Video/i.test(x.innerText)?0:1);
+          const it=[...its].sort((a,b)=>score(b)-score(a))[0];
+          const r=it.getBoundingClientRect();
           return {x:r.x+r.width/2,y:r.y+r.height/2,name:it.innerText.trim().replace(/\\n/g,' ')};})()""")
         if not item: return None
         click_at_xy(item["x"], item["y"])
@@ -1381,3 +1387,153 @@ def _flow_download_impl(asset_id=None, kind=None, quality="best", folder=None, t
                       f"(upscaled downloads can be slow)")
     return {"ok": bool(path), "path": path, "quality": head, "available": available,
             "requested": quality if quality != "best" else "best", "errors": errors}
+
+# --- Google Flow: attach project assets, then compose a multi-reference scene ---
+# flow_attach_ingredients uploads local files. References that already live in the
+# project (generated images, characters, uploads from an earlier task) need the same
+# picker driven by name instead, which is what flow_attach_assets does.
+
+def _flow_pick_picker_asset(name, timeout=20.0):
+    """Search the open picker for `name` and commit the first settled match.
+
+    Returns the picked label, or None. Success is judged by nothing here — callers
+    compare chip counts, because the picker closes underneath the click.
+    """
+    if not _flow_search_box(): return None
+    type_text(name, typing_delay=0.02); _t.sleep(1.0)
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        item = js(f"""(()=>{{const items=[...document.querySelectorAll('.cdk-overlay-pane .asset-item')];
+          const i=items.findIndex(x=>(x.innerText||'').includes({_json.dumps(name)}));
+          if(i<0)return null;
+          if(/Uploading/i.test(items[i].innerText||''))return {{state:'uploading'}};
+          if(/active/.test(items[i].className))return {{state:'active'}};
+          const r=items[i].getBoundingClientRect();
+          window.__bhp={{x:r.x+r.width/2,y:r.y+r.height/2}};
+          return {{state:'ready',name:items[i].innerText.trim().split(String.fromCharCode(10))[0]}};}})()""")
+        if not item: return None
+        if item["state"] == "active":
+            if _flow_click_js(_ADD_TO_PROMPT, 1.6): return item.get("name")
+            return None
+        if item["state"] == "ready":
+            p = js("window.__bhp")
+            if p: click_at_xy(p["x"], p["y"]); _t.sleep(0.7)
+            continue
+        _t.sleep(0.5)
+    return None
+
+def flow_attach_assets(names, timeout=20.0):
+    """Attach assets already in the project as reference chips, found by name.
+
+    names: one name or fragment, or a list. Each is searched in the picker; the first
+    settled match is added. Use this for generated images, earlier uploads, and
+    project media — for local files use flow_attach_ingredients.
+
+    Returns {"ok", "attached", "chips", "errors", "warnings"}.
+    """
+    names = [names] if isinstance(names, str) else [str(n) for n in names]
+    errors, warnings = [], []
+    if _flow_chips() + len(names) > _FLOW_MAX_INGREDIENTS:
+        raise ValueError(f"flow_attach_assets: {len(names)} references with "
+                         f"{_flow_chips()} attached exceeds the {_FLOW_MAX_INGREDIENTS}-reference limit")
+    before = _flow_chips()
+    for name in names:
+        try:
+            if not _flow_open_picker():
+                errors.append(f"{name}: picker did not open"); break
+            n_before = _flow_chips()
+            _flow_pick_picker_asset(name, timeout=timeout)
+            # The pick can add the chip and close the picker underneath the click, so
+            # the helper's return value proves nothing — the chip count is the check.
+            _flow_wait_closed(4.0)
+            if _flow_chips() <= n_before:
+                errors.append(f"{name}: not attached (no match, or already attached)")
+        except Exception as e:
+            errors.append(f"{name}: {type(e).__name__}: {e}")
+            try: js("document.body.click()")
+            except Exception: pass
+            _t.sleep(0.4)
+    return {"ok": not errors, "attached": _flow_chips() - before,
+            "chips": _flow_chips(), "errors": errors, "warnings": warnings}
+
+def flow_compose_scene(parts, references=(), clear_refs=True, generate_type="image",
+                       timeout=300.0, **settings):
+    """Compose a prompt whose references are uploaded, generated, or already present.
+
+    parts:       prompt parts, as in flow_set_prompt_with_mentions — literal strings
+                 and ("mention", name). A plain string may also contain "{name}"
+                 markers, which are replaced by a mention of that reference.
+    references:  list of items; each one of
+                   "/path/to/file.png"                     local file, uploaded as a chip
+                   "Asset name"                            existing project asset, mentioned
+                   {"generate": "prompt", "as": "Term"}    generate it first, mention as Term
+                 `as` must be a substring of the generated asset's name, which Flow
+                 derives from the generate prompt — a distinctive word from it works.
+    clear_refs:  drop existing chips first, so the scene holds exactly these references.
+
+    The 4-reference ceiling is enforced here, before anything touches the page: more
+    than four raises ValueError instead of silently generating from a partial set.
+
+    Returns {"ok", "text", "chips", "mentions", "references", "errors", "warnings"}.
+    """
+    refs = [r if isinstance(r, dict) else {"value": r} for r in references]
+    if len(refs) > _FLOW_MAX_INGREDIENTS:
+        raise ValueError(f"flow_compose_scene: {len(refs)} references exceeds the "
+                         f"{_FLOW_MAX_INGREDIENTS}-reference limit; compress them "
+                         f"(a character counts as one) or split into passes")
+    errors, warnings, resolved = [], [], []
+    files = [r["value"] for r in refs if "value" in r and _os.path.exists(str(r["value"]))]
+    for r in refs:
+        if "value" in r and not _os.path.exists(str(r["value"])):
+            warnings.append(f"{r['value']!r} is not a local file; treated as an asset name")
+
+    if clear_refs:
+        flow_clear_ingredients()
+
+    if files:
+        r = flow_attach_ingredients(files)
+        errors.extend(r["errors"]); warnings.extend(r["warnings"])
+
+    mentioned = []
+    for r in refs:
+        if "generate" in r:
+            gen = flow_generate(prompt=r["generate"], generate_type=generate_type,
+                                timeout=timeout, **settings)
+            if not gen["ok"]:
+                errors.append(f"generate {r['generate']!r}: {'; '.join(gen['errors']) or 'failed'}")
+                continue
+            term = r.get("as") or " ".join(r["generate"].split()[:4])
+            mentioned.append(term); resolved.append(term)
+        elif "value" in r:
+            v = str(r["value"])
+            if _os.path.exists(v): resolved.append(_os.path.basename(v))
+            else: mentioned.append(v); resolved.append(v)
+
+    if parts and isinstance(parts, str):
+        parts = [parts]
+    # Replace {name} markers with mention tuples so the prompt names each reference.
+    expanded = []
+    for part in parts or []:
+        if not isinstance(part, str): expanded.append(part); continue
+        out, rest = [], part
+        while "{" in rest and "}" in rest:
+            head, _, tail = rest.partition("{")
+            name, _, rest = tail.partition("}")
+            if head: out.append(head)
+            out.append(("mention", name))
+        if rest: out.append(rest)
+        expanded.extend(out)
+
+    text = flow_set_prompt_with_mentions(expanded) if expanded else {"ok": True, "text": _flow_editor_text()}
+    errors.extend(text["errors"])
+    # References that are chips only still need attaching; mention them when they are
+    # not already covered by a {name} marker in the prompt.
+    pending = [m for m in mentioned if ("mention", m) not in expanded]
+    for name in pending:
+        try: flow_mention(name)
+        except RuntimeError as e: errors.append(str(e))
+
+    state = _flow_mention_state()
+    return {"ok": not errors and state["mentions"] >= len(mentioned),
+            "text": state["text"], "chips": _flow_chips(), "mentions": state["mentions"],
+            "references": resolved, "errors": errors, "warnings": warnings}
