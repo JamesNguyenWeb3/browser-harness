@@ -550,3 +550,284 @@ def flow_clear_mentions():
         if n > 30: break
     _flow_cursor_to_end()
     return n
+
+# --- Google Flow: character creation ---
+# Characters are created on a sub-page: /project/<id>/character (blank) or
+# /character/<uuid> (existing). The blank page shows style presets, a description
+# editor, Upload / Add from project, and Start generation. Generating opens the
+# character editor with name, voice, personality and portrait slots.
+
+_FLOW_CHAR_NAME = "input.name-input"
+_FLOW_CHAR_PERSONALITY = "textarea.personality-textarea"
+_FLOW_CHAR_DESC = "flow-rich-text-editor .ProseMirror, .ProseMirror"
+_FLOW_CHAR_VOICE_BTN = ("[...document.querySelectorAll('button')]"
+                        ".find(x=>/voice_selection/.test(x.innerText))")
+_FLOW_CHAR_URL = "/character"
+
+def _flow_char_open_new():
+    """Open the blank New character page from a project. Returns the URL."""
+    if js(f"location.pathname.includes({_FLOW_CHAR_URL!r})"): return js("location.href")
+    if not _flow_click_js("[...document.querySelectorAll('button')].find(x=>/Characters/.test(x.innerText))", 1.4):
+        return None
+    _flow_click_js("[...document.querySelectorAll('button')].find(x=>/New character/.test(x.innerText))", 1.8)
+    _t.sleep(0.8)
+    return js("location.href")
+
+def _flow_char_set_input(selector, value):
+    """Replace a plain input/textarea value. Framework-bound fields ignore a raw
+    `value` assignment, so set through the prototype setter and fire `input`."""
+    ok = js(f"""(()=>{{const i=document.querySelector({selector!r});if(!i)return false;
+      const p=i instanceof HTMLTextAreaElement?window.HTMLTextAreaElement.prototype:window.HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(p,'value').set.call(i,'');
+      i.dispatchEvent(new Event('input',{{bubbles:true}}));
+      const r=i.getBoundingClientRect();window.__bhp={{x:r.x+r.width/2,y:r.y+r.height/2}};return true;}})()""")
+    if not ok: return False
+    p = js("window.__bhp")
+    click_at_xy(p["x"], p["y"]); _t.sleep(0.25)
+    type_text(value, typing_delay=0.02); _t.sleep(0.4)
+    return js(f"document.querySelector({selector!r}).value") == value
+
+def _flow_char_wait_idle(timeout=180.0):
+    """Wait until no generation-percentage indicator is on the page."""
+    deadline = _t.time() + timeout
+    _t.sleep(2.0)
+    while _t.time() < deadline:
+        pct = js("(()=>{const m=document.body.innerText.match(/(\\d+)\\s*%/);return m?parseInt(m[1]):null;})()")
+        if pct is None: return True
+        _t.sleep(2.5)
+    return False
+
+def flow_set_character_voice(preset=None, performance=None, name=None, sample=None, timeout=180.0):
+    """Attach a voice to the character currently open.
+
+    preset:      a built-in voice name (Achernar, Achird, ...). Searched in the panel.
+    performance: instead of a preset, describe a voice in Customize performance.
+    name:        name for the generated voice (required with `performance`).
+    sample:      optional sample dialogue text (max 120 chars).
+
+    With `preset`, the built-in is added directly. With `performance`, the panel's
+    "Customize performance" field is filled, then Preview generates the voice and
+    only then does "Add to character" appear — Save is never enabled directly.
+
+    Returns {"ok", "voice", "errors"}.
+    """
+    if preset is None and performance is None:
+        raise ValueError("flow_set_character_voice: pass preset or performance")
+    if performance and not name:
+        raise ValueError("flow_set_character_voice: `name` is required with `performance`")
+    errors = []
+    # A closing overlay's backdrop swallows the next click, so retry the open until
+    # the panel is actually up.
+    opened = False
+    for _ in range(3):
+        if js("!!document.querySelector('.cdk-overlay-pane textarea.performance-input, .cdk-overlay-pane input.search-input')"):
+            opened = True; break
+        if _flow_click_js(_FLOW_CHAR_VOICE_BTN, 1.4):
+            if js("!!document.querySelector('.cdk-overlay-pane')"):
+                opened = True; break
+        _t.sleep(0.6)
+    if not opened:
+        return {"ok": False, "voice": None, "errors": ["voice selector not found"]}
+
+    if preset:
+        # The panel lists built-ins with a search box; narrow it, then pick the row.
+        if not _flow_search_box():
+            errors.append("voice search box not found")
+        else:
+            type_text(preset, typing_delay=0.02)
+        # While the list is still filtering, an intermediate row can carry the query
+        # text as its label (picking one stored the voice literally as "aoede").
+        # Wait for the row list to stop changing, and require an exact name match.
+        item, last = None, None
+        deadline = _t.time() + 8.0
+        while _t.time() < deadline:
+            rows = js("JSON.stringify([...document.querySelectorAll('.cdk-overlay-pane button')]"
+                      ".map(b=>b.innerText.trim().replace(/\\n/g,'|')).filter(t=>t.startsWith('voice_selection')))")
+            if rows == last and rows not in (None, "[]"): break
+            last = rows; _t.sleep(0.4)
+        _t.sleep(0.3)
+        item = js(f"""(()=>{{const want={preset.strip().lower()!r};
+          const it=[...document.querySelectorAll('.cdk-overlay-pane button')].find(b=>{{
+            const parts=b.innerText.trim().split('\\n').map(s=>s.trim());
+            return parts[1] && parts[1].toLowerCase()===want;}});
+          if(!it)return null;const r=it.getBoundingClientRect();
+          return {{x:r.x+r.width/2,y:r.y+r.height/2,name:it.innerText.trim().split('\\n')[1]}};}})()""")
+        if not item:
+            errors.append(f"preset {preset!r} not found in the voice list")
+        else:
+            click_at_xy(item["x"], item["y"]); _t.sleep(0.9)
+            add = js("""(()=>{const b=[...document.querySelectorAll('.cdk-overlay-pane button')]
+              .find(x=>/Add to character/i.test(x.innerText));
+              if(!b)return null;const r=b.getBoundingClientRect();
+              return {x:r.x+r.width/2,y:r.y+r.height/2};})()""")
+            if add: click_at_xy(add["x"], add["y"]); _t.sleep(1.4)
+    else:
+        # Custom performance: fill the style, optionally the sample dialogue. The
+        # panel pre-fills the sample with placeholder text, so always set it.
+        _flow_char_set_input(".cdk-overlay-pane textarea.sample-dialogue-input",
+                             (sample or "Hi there.")[:120])
+        _flow_char_set_input(".cdk-overlay-pane textarea.performance-input", performance)
+        # Typing into the performance field is what switches the panel into
+        # customize mode; the Voice name input does not exist before that.
+        deadline = _t.time() + 6.0
+        while _t.time() < deadline and not js("!!document.querySelector('.cdk-overlay-pane input.voice-name-input')"):
+            _t.sleep(0.3)
+        if not _flow_char_set_input(".cdk-overlay-pane input.voice-name-input", name):
+            errors.append("voice name field not found")
+        _t.sleep(0.4)
+        # Panel state machine for a custom voice (measured):
+        #   edit performance/sample -> "Save new voice" (disabled while Preview runs)
+        #   Preview                  -> hourglass, then "Save new voice" enabled
+        #   Save new voice           -> registers the voice, button becomes "Add to character"
+        #   Add to character         -> attaches it to the character
+        # Skipping Save leaves the voice unnamed and never attaches.
+        def centre(js_find):
+            js(f"""(()=>{{const b={js_find};if(!b||b.disabled){{window.__bhp=null;return;}}
+              b.scrollIntoView({{block:'center'}});const r=b.getBoundingClientRect();
+              window.__bhp={{x:r.x+r.width/2,y:r.y+r.height/2}};}})()""")
+            return js("window.__bhp")
+
+        def wait_enabled(pattern, timeout_s=120.0):
+            end = _t.time() + timeout_s
+            while _t.time() < end:
+                c = centre(f"[...document.querySelectorAll('.cdk-overlay-pane button')].find(x=>/{pattern}/i.test(x.innerText))")
+                if c: return c
+                _t.sleep(1.5)
+            return None
+
+        preview = centre("[...document.querySelectorAll('.cdk-overlay-pane button')].find(x=>/Preview/i.test(x.innerText))")
+        if preview: click_at_xy(preview["x"], preview["y"])
+        else: errors.append("Preview button not found")
+
+        saved = False
+        save_btn = wait_enabled("Save new voice")
+        if save_btn:
+            click_at_xy(save_btn["x"], save_btn["y"]); _t.sleep(1.5); saved = True
+            # After saving, the panel offers Add to character.
+            add = wait_enabled("Add to character", timeout_s=30.0)
+            if add:
+                click_at_xy(add["x"], add["y"]); _t.sleep(1.4)
+            else:
+                errors.append("Add to character did not appear after saving the voice")
+        else:
+            # An already-saved performance may offer Add directly.
+            add = wait_enabled("Add to character", timeout_s=10.0)
+            if add: click_at_xy(add["x"], add["y"]); _t.sleep(1.4)
+            else: errors.append("custom voice never became saveable")
+
+    _t.sleep(1.0)
+    if js("!!document.querySelector('.cdk-overlay-pane')"):
+        _flow_click_js("[...document.querySelectorAll('.cdk-overlay-pane button')].find(x=>/^close$|Close/i.test((x.innerText||'')+x.getAttribute('aria-label')))", 0.8)
+    voice = js("""(()=>{const b=[...document.querySelectorAll('button')].find(x=>/voice_selection/.test(x.innerText));
+      return b?b.innerText.trim().replace(/\\n/g,' '):null;})()""")
+    ok = bool(voice) and "Select a voice" not in voice and not errors
+    return {"ok": ok, "voice": voice, "errors": errors}
+
+def flow_create_character(name, prompt=None, image=None, personality=None,
+                          voice_preset=None, voice_performance=None, voice_name=None,
+                          voice_sample=None, style=None, timeout=180.0, finalize=True):
+    """Create a Flow character from a prompt, an image, or both, and give it a voice.
+
+    name:        character name (required).
+    prompt:      description used to generate the portrait.
+    image:       local image path used as the portrait reference instead of generating.
+    personality: optional free text for "Character info".
+    voice_preset:      built-in voice name, e.g. "Achernar".
+    voice_performance: describe a voice; generates one (needs voice_name).
+    style:       optional preset card: Eccentric, Professional, Wildcard, Familiar,
+                 Wicked, Fantastical — seeds the prompt from a template.
+    finalize:    click Done when the character is complete.
+
+    At least one of `prompt` / `image` must be given; both together is allowed.
+    Returns {"ok", "name", "url", "voice", "image", "errors", "warnings"}.
+    """
+    if not prompt and not image:
+        raise ValueError("flow_create_character: pass prompt and/or image")
+    errors, warnings = [], []
+    url = _flow_char_open_new()
+    if not url or _FLOW_CHAR_URL not in url:
+        raise RuntimeError("flow_create_character: could not open the New character page")
+
+    if style:
+        if not _flow_click_js(f"[...document.querySelectorAll('button')].find(x=>/^{style}\\|/i.test(x.innerText.replace(/\\n/g,'|')))", 1.2):
+            warnings.append(f"style card {style!r} not found; continuing without it")
+
+    if prompt:
+        if not js("!!document.querySelector('.ProseMirror')"):
+            errors.append("character description box not found")
+        else:
+            js("(()=>{const e=document.querySelector('.ProseMirror');e.focus();e.click();})()"); _t.sleep(0.3)
+            type_text(prompt, typing_delay=0.02); _t.sleep(0.5)
+
+    # Image-only (no prompt) means uploading a portrait; with a prompt the image is
+    # a starting point that the prompt edits. Both need a generated/committed slot
+    # before the character editor exists, so the blank page only opens the editor
+    # via Start generation — which requires description text.
+    if image:
+        # The character page has no DOM-reachable upload: "Upload" and the picker's
+        # "Upload media" both open the OS file dialog and create no input[type=file]
+        # (unlike the prompt box's picker). Reuse an image already in the project
+        # instead — upload it first with flow_attach_ingredients on the project page.
+        if not _flow_click_js("[...document.querySelectorAll('button')].find(x=>/Add from project/.test(x.innerText))", 1.4):
+            errors.append("Add from project button not found")
+        else:
+            name = _os.path.basename(image)
+            item = js(f"""(()=>{{const it=[...document.querySelectorAll('.cdk-overlay-pane .asset-item')]
+              .find(x=>(x.innerText||'').includes({_json.dumps(name)}));
+              if(!it)return null;const r=it.getBoundingClientRect();
+              return {{x:r.x+r.width/2,y:r.y+r.height/2}};}})()""")
+            if not item:
+                errors.append(f"{name} is not in this project; upload it on the project page first")
+                _flow_wait_closed()
+            else:
+                click_at_xy(item["x"], item["y"]); _t.sleep(1.4)
+                _flow_wait_closed()
+
+    if prompt:
+        # "Create portrait" only selects the mode; Start generation runs it.
+        _flow_click_js("[...document.querySelectorAll('button')].find(x=>/Create portrait|Portrait/.test(x.innerText))", 1.0)
+        started = js("""(()=>{const b=[...document.querySelectorAll('button')].find(x=>x.getAttribute('aria-label')==='Start generation');
+          return !!(b && !b.disabled);})()""")
+        if not started:
+            errors.append("Start generation is disabled")
+        else:
+            _flow_click_js("[...document.querySelectorAll('button')].find(x=>x.getAttribute('aria-label')==='Start generation')", 2.0)
+            if not _flow_char_wait_idle(timeout=timeout):
+                warnings.append("portrait generation did not finish within the timeout")
+    portraits = js("document.querySelectorAll('img[src*=flow-content]').length")
+
+    # Name and personality live on the character editor that generation opens.
+    if not js(f"!!document.querySelector({_FLOW_CHAR_NAME!r})"):
+        _t.sleep(2.0)
+    if js(f"!!document.querySelector({_FLOW_CHAR_NAME!r})"):
+        if not _flow_char_set_input(_FLOW_CHAR_NAME, name):
+            errors.append("character name field did not accept the value")
+        if personality and not _flow_char_set_input(_FLOW_CHAR_PERSONALITY, personality):
+            warnings.append("personality field not found")
+        if image and not prompt:
+            # Portrait slot on the editor: upload there, which is the only path
+            # that adds an image without generating one.
+            _flow_click_js("[...document.querySelectorAll('button')].find(x=>/^upload$|Upload/.test((x.innerText||'')+x.getAttribute('aria-label')))", 1.0)
+            if js("!!document.querySelector('input[type=file]')"):
+                doc = cdp("DOM.getDocument", depth=-1)
+                nid = cdp("DOM.querySelector", nodeId=doc["root"]["nodeId"], selector="input[type=file]")["nodeId"]
+                cdp("DOM.setFileInputFiles", files=[image], nodeId=nid)
+                _t.sleep(3.0)
+            else:
+                warnings.append("portrait upload input not found")
+    else:
+        errors.append("character editor (name field) not found")
+
+    voice = None
+    if voice_preset or voice_performance:
+        v = flow_set_character_voice(preset=voice_preset, performance=voice_performance,
+                                     name=voice_name, sample=voice_sample, timeout=timeout)
+        voice = v["voice"]
+        errors.extend(v["errors"])
+
+    final_url = js("location.href")
+    if finalize:
+        _flow_click_js("[...document.querySelectorAll('button')].find(x=>/^Done$/.test(x.innerText.trim()))", 2.0)
+        final_url = js("location.href")
+    return {"ok": not errors, "name": name, "url": final_url, "voice": voice,
+            "image": bool(portraits), "errors": errors, "warnings": warnings}

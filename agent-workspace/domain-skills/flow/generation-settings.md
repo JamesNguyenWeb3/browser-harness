@@ -178,3 +178,87 @@ flow_mention("RedMud")   # types @, filters, picks, returns the label
 
 - Mention resolution is by first match in the active tab; there is no exact-name matching, so pick names that are unique in that tab's list.
 - Requires the asset to already exist in the project (upload it first with `flow_attach_ingredients`).
+
+---
+
+# Characters
+
+Field-tested against `flow.google.com/project/e23b42bb-…` on 2026-11-01.
+Primitives: `flow_create_character()`, `flow_set_character_voice()`.
+
+## Quick summary
+
+Characters live on their own sub-page: `/project/<id>/character` is the blank creator,
+`/character/<uuid>` is an existing one. The blank page shows style cards, a description
+editor and **Start generation**; generating opens the character **editor**, which is the
+only place name, voice, personality and portrait actually live.
+
+```python
+flow_create_character(
+    name="Mara",
+    prompt="A woman in her early 30s, copper hair, wool coat, overcast daylight.",
+    personality="Reserved, precise, quietly warm.",
+    voice_preset="Aoede",
+)
+```
+
+Returns `{"ok", "name", "url", "voice", "image", "errors", "warnings"}`.
+
+## What is actually reachable
+
+| Want | Works? |
+| --- | --- |
+| Prompt-only character | Yes |
+| Preset voice | Yes |
+| Custom voice from a performance description | Yes — Preview → Save new voice → Add to character |
+| Image **already in the project** as portrait | Yes, via **Add from project** |
+| Uploading a local image for a character | **No** — see below |
+
+**Upload is not driveable on the character page.** Both the `Upload` button and the
+media picker's `Upload media` open the OS file dialog and create no `input[type=file]`
+in the DOM (unlike the prompt-box picker, where the same button does). A CDP client
+can only set files on an input that exists. Upload the image first on the project
+page with `flow_attach_ingredients()`, then pass it by filename to
+`flow_create_character(image=...)`, which adds it through **Add from project**.
+
+The bare `Upload` button opening the OS dialog is a real capability gap, not a bug
+in the primitive.
+
+## Custom voice state machine (the fiddly part)
+
+Measured by stepping the panel:
+
+| Step | Button shown |
+| --- | --- |
+| Panel opens | `Preview` + `Save new voice` (disabled) |
+| Editing performance or sample text | `Save new voice` (disabled) |
+| Click `Preview` | `hourglass_top` on Preview, everything disabled |
+| Preview finishes | `Save new voice` enabled |
+| Click `Save new voice` | `Add to character` |
+| Click `Add to character` | voice attached, panel closes |
+
+Skipping **Save new voice** leaves the voice unpublished and never offers
+`Add to character` — that was the failure that took longest to diagnose. `Preview`
+also takes 10–30 s, so the helper waits for the button to leave its disabled state
+rather than sleeping a fixed time.
+
+The panel **remembers** the previous custom voice: reopening it can already show
+`Add to character` with no Preview. The helper re-runs Preview when you pass a new
+`performance`, so the audio matches the description.
+
+## Two behaviours worth knowing
+
+- **Preset lookup must be exact.** Searching narrows the list asynchronously; an
+  intermediate row carries the query text as its own label. Matching on substring
+  once stored a voice literally named `aoede`. The helper waits for the list to
+  settle and matches the row's name exactly.
+- **The name field appears only after the performance field is non-empty.** Filling
+  `voice-name-input` first fails with "not found".
+
+## Limits
+
+- Voice presets are the built-ins listed in the panel (Achernar, Achird, Aoede, …).
+- The portrait generates as several variants (3 observed); the primitive reports
+  `image: True` but does not pick among them.
+- `finalize=True` clicks **Done**, which returns to the project and saves the
+  character. Pass `False` to stay on the editor.
