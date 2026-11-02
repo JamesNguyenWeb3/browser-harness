@@ -489,8 +489,14 @@ def flow_mention(name, clear_text="@", timeout=8.0):
     type_text("@"); _t.sleep(1.2)
     if not _flow_mention_state()["overlay"]:
         raise RuntimeError("flow_mention: the @ popup did not open")
+    chips_before = _flow_chip_count()
     picked = _flow_pick_from_popup(name, timeout=timeout)
     if picked is None:
+        # A pick can add the reference chip without inserting the mention span,
+        # leaving a phantom reference that the prompt text never mentions. Undo it.
+        added = _flow_chip_count() - chips_before
+        for _ in range(max(0, added)):
+            _flow_remove_last_chip()
         # Nothing matched: the popup is gone and the "@" is still in the prompt.
         # Focus is left in the closed popup's search box, so Backspace there would
         # do nothing — put the caret back in the editor first.
@@ -1155,12 +1161,38 @@ def _flow_overlay_is_picker():
     """The asset pickers all show a search box; a result preview does not."""
     return bool(js("!!document.querySelector('.cdk-overlay-pane input.search-input')"))
 
+def _flow_show_all_media():
+    """Make sure the media grid is the active library tab.
+
+    flow_list_results and flow_download read tiles from the media grid. On the
+    Characters or Scenes tab those tiles are not rendered (character cards take their
+    place), so listing returned 0 for a project that has assets. Click "All media"
+    when no media tile is present.
+    """
+    if js("""(()=>{for(const t of document.querySelectorAll('flow-tile-container')){
+      if(t.querySelector('flow-image-tile,flow-video-tile,[data-media-id]'))return true;}
+      return false;})()"""): return True
+    return _flow_click_js("[...document.querySelectorAll('button')].find(x=>/All media/.test(x.textContent||''))", 2.0)
+
+def _flow_chip_count():
+    return js("document.querySelectorAll('flow-ingredient-chip').length")
+
+def _flow_remove_last_chip():
+    """Remove the most recently added ingredient chip. Returns True if one went."""
+    gone = js("""(()=>{const chips=[...document.querySelectorAll('flow-ingredient-chip')];
+      const last=chips[chips.length-1]; if(!last)return false;
+      const b=last.querySelector('button.chip-container'); if(!b)return false;
+      b.click(); return true;})()""")
+    _t.sleep(0.8)
+    return bool(gone)
+
 def flow_list_results(kind=None, limit=20):
     """Assets currently rendered in the project's media grid, newest first.
 
     kind: "image" | "video" | None for both.
     Returns {"ok", "assets": [{"id","kind","url"}], "count"}.
     """
+    _flow_show_all_media()
     ids = _flow_asset_ids()
     want = str(kind).strip().lower() if kind else None
     assets = [_flow_asset(k, v) for k, v in ids.items() if want is None or v == want]
@@ -1287,6 +1319,8 @@ def _flow_download_impl(asset_id=None, kind=None, quality="best", folder=None, t
     # A menu left open from an earlier call (including one that raised) keeps the
     # next More-options click from opening a fresh one.
     _flow_close_menus()
+    # Tiles only exist while the media grid is the active tab.
+    _flow_show_all_media()
 
     tile = _flow_tile_for(asset_id, kind)
     if not tile:
