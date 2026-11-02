@@ -1534,6 +1534,14 @@ def flow_compose_scene(parts, references=(), clear_refs=True, generate_type="ima
         except RuntimeError as e: errors.append(str(e))
 
     state = _flow_mention_state()
-    return {"ok": not errors and state["mentions"] >= len(mentioned),
-            "text": state["text"], "chips": _flow_chips(), "mentions": state["mentions"],
-            "references": resolved, "errors": errors, "warnings": warnings}
+    chips = _flow_chips()
+    # One chip per distinct reference. `resolved` holds each reference's identity —
+    # the uploaded filename, the asset name, or the generate term — so duplicates that
+    # Flow dedupes count once and the check still holds.
+    expected = len({str(x).strip().lower() for x in resolved})
+    if chips < expected:
+        errors.append(f"{expected} references expected but {chips} are attached")
+    return {"ok": not errors and state["mentions"] >= len(mentioned) and chips >= expected,
+            "text": state["text"], "chips": chips, "mentions": state["mentions"],
+            "expected_chips": expected, "references": resolved,
+            "errors": errors, "warnings": warnings}

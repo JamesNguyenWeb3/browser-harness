@@ -88,9 +88,16 @@ underneath clicks. Read the counts:
 
 ```python
 r = flow_compose_scene(...)
-if r["chips"] != len(references) or r["mentions"] != named_count:
-    # the scene is not what you asked for — fix it before generating
+if not r["ok"]:                 # chips attached, mentions inserted, nothing dropped
+    ...
+if r["chips"] < r["expected_chips"]:
+    ...
 ```
+
+`ok` requires all three: no errors, `mentions` at least as many as the named references,
+and `chips` at least `expected_chips` — one per distinct reference, so a duplicate that
+Flow dedupes still counts as satisfied. A reference that silently failed to attach now
+turns `ok` false instead of passing.
 
 A `flow_mention` that adds a chip without inserting its mention span is the failure
 this guards against; the primitive now removes that phantom chip, but the count check
