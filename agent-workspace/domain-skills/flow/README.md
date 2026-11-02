@@ -13,7 +13,7 @@ These files are surfaced by `goto_url()` for a `flow.google.com` project when
 - `characters.md` — create a character from a prompt and/or a portrait, with a voice
 - `video-frames.md` — first/last-frame video: an image per slot
 - `downloading.md` — pick the best tier the plan allows, write the file to disk
-- `many-references.md` — scenes needing several references: the four-reference cap,
+- `many-references.md` — scenes needing several references: how many are sane,
   compression, and how chips and mentions combine
 
 ## The pipeline

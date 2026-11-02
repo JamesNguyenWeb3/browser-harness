@@ -215,7 +215,10 @@ def generate_setting_trigger(generate_type="video", aspect_ratio=None, model=Non
 # each one becomes a <flow-ingredient-chip> beside it.
 
 _FLOW_EDITOR = "flow-rich-text-editor .ProseMirror"
-_FLOW_MAX_INGREDIENTS = 4  # the picker stops adding past four
+# Flow accepted seven reference chips in testing and showed no ceiling, so there is no
+# hard limit to enforce. This is a soft warning point, past which the prompt carries so
+# many references that the model's own limits and the prompt budget start to matter.
+_FLOW_REFERENCE_WARN = 8
 
 def _flow_editor_text():
     return js(f"""(()=>{{const e=document.querySelector({_FLOW_EDITOR!r});return e?e.innerText:null;}})()""")
@@ -325,8 +328,7 @@ def flow_attach_ingredients(paths):
 
     `paths`: one path or a list. Images (.png/.jpg/.jpeg/.webp/.gif/.heif/.heic) and
     videos (.mp4/.m4v/.mov/.3gp/.avi) are accepted. The picker selects one asset at a
-    time, so each path is uploaded and attached separately. At most four ingredients
-    can be attached.
+    time, so each path is uploaded and attached separately.
 
     Returns {"ok", "attached", "chips", "errors", "warnings"}.
     """
@@ -334,9 +336,9 @@ def flow_attach_ingredients(paths):
     errors, warnings = [], []
     missing = [p for p in paths if not _os.path.exists(p)]
     if missing: raise ValueError(f"flow_attach_ingredients: file not found: {missing}")
-    while _flow_chips() + len(paths) > _FLOW_MAX_INGREDIENTS:
-        dropped = paths.pop()
-        warnings.append(f"{dropped}: Flow accepts at most {_FLOW_MAX_INGREDIENTS} ingredients; not attached")
+    if _flow_chips() + len(paths) > _FLOW_REFERENCE_WARN:
+        warnings.append(f"{_flow_chips() + len(paths)} references is a lot; the model may "
+                        f"not use all of them")
     before = _flow_chips()
     for p in paths:
         try:
@@ -1433,9 +1435,9 @@ def flow_attach_assets(names, timeout=20.0):
     """
     names = [names] if isinstance(names, str) else [str(n) for n in names]
     errors, warnings = [], []
-    if _flow_chips() + len(names) > _FLOW_MAX_INGREDIENTS:
-        raise ValueError(f"flow_attach_assets: {len(names)} references with "
-                         f"{_flow_chips()} attached exceeds the {_FLOW_MAX_INGREDIENTS}-reference limit")
+    if _flow_chips() + len(names) > _FLOW_REFERENCE_WARN:
+        warnings.append(f"{_flow_chips() + len(names)} references is a lot; the model may "
+                        f"not use all of them")
     before = _flow_chips()
     for name in names:
         try:
@@ -1471,17 +1473,15 @@ def flow_compose_scene(parts, references=(), clear_refs=True, generate_type="ima
                  derives from the generate prompt — a distinctive word from it works.
     clear_refs:  drop existing chips first, so the scene holds exactly these references.
 
-    The 4-reference ceiling is enforced here, before anything touches the page: more
-    than four raises ValueError instead of silently generating from a partial set.
+    There is no hard reference limit; past _FLOW_REFERENCE_WARN the result carries a
+    warning, because the model's own limits and the prompt budget start to bite.
 
     Returns {"ok", "text", "chips", "mentions", "references", "errors", "warnings"}.
     """
     refs = [r if isinstance(r, dict) else {"value": r} for r in references]
-    if len(refs) > _FLOW_MAX_INGREDIENTS:
-        raise ValueError(f"flow_compose_scene: {len(refs)} references exceeds the "
-                         f"{_FLOW_MAX_INGREDIENTS}-reference limit; compress them "
-                         f"(a character counts as one) or split into passes")
     errors, warnings, resolved = [], [], []
+    if len(refs) > _FLOW_REFERENCE_WARN:
+        warnings.append(f"{len(refs)} references is a lot; the model may not use all of them")
     files = [r["value"] for r in refs if "value" in r and _os.path.exists(str(r["value"]))]
     for r in refs:
         if "value" in r and not _os.path.exists(str(r["value"])):

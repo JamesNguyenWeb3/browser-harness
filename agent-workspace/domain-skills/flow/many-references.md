@@ -4,22 +4,17 @@ A **reference** is anything the generation must look at: a local file, a project
 a character, or something you generate first. This page is the workflow for prompts
 that need more than one.
 
-## The ceiling: four
+## There is no hard ceiling
 
-Flow accepts **four references per generation**, chips and mentions together. That is
-the constraint the whole workflow serves.
+Flow accepted **seven** reference chips in testing with no refusal, and no limit was
+found. Nothing is dropped: `flow_attach_ingredients`, `flow_attach_assets` and
+`flow_compose_scene` attach what you give them and warn past **eight** references,
+because that is where the model's own reference budget and the prompt budget start to
+matter rather than where Flow stops.
 
-Enforced before anything touches the page:
-
-```
-flow_compose_scene("…", references=[a, b, c, d, e])
-→ ValueError: 5 references exceeds the 4-reference limit; compress them
-   (a character counts as one) or split into passes
-```
-
-`flow_attach_ingredients` and `flow_attach_assets` warn and drop the extras instead, so
-a fifth reference never fails loudly on its own. **Check the returned count before
-generating** — a dropped reference produces a plausible image from the wrong set.
+Treat four as a *comfort* point, not a rule. Every reference you add dilutes the
+prompt, so compress when the scene reads like a list of assets rather than a
+description.
 
 ## Pick the primitive per reference
 
@@ -44,9 +39,9 @@ flow_compose_scene(
 #  'references': ['lisa_ref.png', 'Lisa', 'clay jar'], 'errors': [], 'warnings': []}
 ```
 
-1. **Inventory — cap at four.** List every reference and its type. Stop and compress
-   when the list is longer than four.
-   *Done when:* the list has at most four entries, each typed.
+1. **Inventory.** List every reference and its type, then compress until the prompt
+   still reads as one sentence.
+   *Done when:* every reference has a type, and each one earns its place.
 2. **Resolve — make each one real.** Local files upload, missing ones generate, existing
    ones are found by name.
    *Done when:* every reference exists either as a local path that uploads or a name
@@ -59,16 +54,16 @@ flow_compose_scene(
    place, then `flow_download`.
    *Done when:* `assets` holds at least one entry and `path` names a file.
 
-## Compress before you spend the fourth
+## Compress by choosing the unit
 
-Four is generous when you choose the unit:
+A reference can stand for more than a file:
 
 - **A character is one reference.** `flow_create_character` bundles portrait,
   personality and voice, so "Lisa in a red coat, voiced warmly" is `@Lisa` rather than
   a portrait plus a costume image plus a voice.
-- **A composite is one reference.** Generate once from four references, download that
-  image, then run the final generation with the composite as the only reference. Two
-  cheap passes beat one impossible one.
+- **A composite is one reference.** Generate a scene from several references, download
+  that image, then run the final generation with the composite as the only reference.
+  Two cheap passes beat one crowded one.
 - **Mention what you already chip.** Mentioning an attached asset is free — it adds
   wording, not budget. Chips suit description; mentions suit a prompt that names the
   thing.
@@ -100,3 +95,9 @@ if r["chips"] != len(references) or r["mentions"] != named_count:
 A `flow_mention` that adds a chip without inserting its mention span is the failure
 this guards against; the primitive now removes that phantom chip, but the count check
 is what tells you the scene is sound.
+
+## Why "four" appears in older notes
+
+An early probe concluded four because it re-picked the first result each round, and
+Flow dedupes a repeated asset — the count stopped rising at four for that reason, not
+because of a limit. Re-measured directly, five, six and seven all attached.

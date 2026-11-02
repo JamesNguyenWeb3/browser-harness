@@ -69,10 +69,11 @@ flow_compose_prompt("Character A in a rain-soaked alley", refs=["/path/to/a.png"
 name with `flow_attach_assets("name")` instead of being re-uploaded.
 
 For a prompt that needs several references of mixed kinds, read `many-references.md` —
-it covers the four-reference ceiling, compression, and the verified workflow.
+it covers how many references are sane, compression, and the verified workflow.
 
-- **Four references is the ceiling.** Flow stops adding past four; the primitive
-  reports the extras in `warnings` rather than attaching them silently.
+- **Reference count is soft.** Flow attached seven in testing with no refusal, so
+  nothing is dropped; past eight the primitive warns, because that is where the model's
+  own budget and the prompt budget start to matter.
 - **`clear_refs=True`** removes existing chips first, so `refs` is exactly the set.
   Without it, references from an earlier task stay attached and change the output.
 - Each attach verifies the chip count rose. A duplicate Flow drops comes back as an
