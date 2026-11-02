@@ -1165,3 +1165,185 @@ def flow_list_results(kind=None, limit=20):
     want = str(kind).strip().lower() if kind else None
     assets = [_flow_asset(k, v) for k, v in ids.items() if want is None or v == want]
     return {"ok": True, "assets": assets[:limit], "count": len(assets)}
+
+# --- Google Flow: download a generated asset at the best allowed quality ---
+# Each tile's More options menu has Download, which opens a quality submenu:
+#   images  -> "1K Original size", "2K Upscaled", "4K Upscaled", "Upgrade"
+#   videos  -> "720p Original size", "4K Upscaled", "Upgrade"
+# Options the plan does not allow are rendered with tabindex="-1"; "Upgrade" is a
+# call to action, never a quality. Upscaled choices are asynchronous: Flow shows
+# "Upscaling your image, download will start automatically." and writes the file
+# a few seconds later, so the primitive waits for a new file to appear.
+
+_FLOW_QUALITY_RANK = {"360p": 360, "720p": 720, "1080p": 1080,
+                      "1K": 1000, "2K": 2000, "4K": 4000}
+_FLOW_DEFAULT_DL = "~/Downloads/flow"
+
+def _flow_quality_options():
+    """[(label, rank, enabled)] from the open download submenu."""
+    raw = js("""JSON.stringify([...document.querySelectorAll('[role=menuitem]')]
+      .map(m=>({t:(m.innerText||'').trim().replace(/\\n/g,' '),tab:m.getAttribute('tabindex')}))
+      .filter(o=>/Original size|Upscaled|Upgrade/i.test(o.t)||/^\\d+(p|K)\\b/i.test(o.t)))""")
+    out = []
+    for o in _json.loads(raw or "[]"):
+        text = o["t"]
+        if "upgrade" in text.lower(): continue
+        head = text.split(" ")[0]
+        rank = _FLOW_QUALITY_RANK.get(head.upper()) or _FLOW_QUALITY_RANK.get(head.lower())
+        if rank is None:
+            # "2K Upscaled" style already covered; anything else is not a quality.
+            continue
+        out.append((head, rank, o["tab"] != "-1"))
+    return out
+
+def _flow_tile_for(asset_id=None, kind=None):
+    """Centre of the More-options button for the tile matching `asset_id`/`kind`.
+
+    asset_id matches a data-media-id UUID or a `thumb:` key; with neither, the first
+    tile of `kind` is used (the grid is newest-first).
+    """
+    want = None
+    if asset_id:
+        want = asset_id.split(":", 1)[1] if asset_id.startswith("thumb:") else asset_id
+    return js(f"""(()=>{{const want={_json.dumps(want)};const kind={_json.dumps(kind)};
+      for(const t of document.querySelectorAll('flow-tile-container')){{
+        const isVid=!!t.querySelector('flow-video-tile');
+        const isImg=!!t.querySelector('flow-image-tile');
+        if(kind==='video'&&!isVid)continue;
+        if(kind==='image'&&!isImg)continue;
+        if(want){{
+          const mid=t.querySelector('[data-media-id]');
+          const img=t.querySelector('img');
+          const seg=img&&img.src?img.src.split('?')[0].split('/').pop():'';
+          const hit=(mid&&mid.getAttribute('data-media-id')===want)||(seg&&seg.indexOf(want)>=0)
+                   ||(img&&(img.src||'').indexOf(want)>=0);
+          if(!hit)continue;
+        }}
+        const b=t.querySelector('button[aria-label="More options"]');
+        if(!b)continue;
+        const r=b.getBoundingClientRect();
+        return {{x:r.x+r.width/2,y:r.y+r.height/2}};
+      }}
+      return null;}})()""")
+
+def _flow_wait_new_file(folder, before, timeout=180.0):
+    """Wait for a new, complete file in `folder`. Size must be stable across two polls."""
+    deadline = _t.time() + timeout
+    last = {}
+    while _t.time() < deadline:
+        try:
+            now = {f: _os.path.getsize(_os.path.join(folder, f))
+                   for f in _os.listdir(folder) if f not in before and not f.endswith(".crdownload")}
+        except FileNotFoundError:
+            now = {}
+        if now:
+            if now == last and all(now[f] > 0 for f in now):
+                name = max(now, key=lambda f: _os.path.getmtime(_os.path.join(folder, f)))
+                return _os.path.join(folder, name)
+            last = now
+        _t.sleep(1.5)
+    return None
+
+def _flow_close_menus():
+    """Dismiss any open mat-menu. body clicks do not close these; Escape does."""
+    for _ in range(4):
+        if not js("document.querySelectorAll('[role=menu]').length"): return True
+        press_key("Escape"); _t.sleep(0.4)
+    if js("document.querySelectorAll('[role=menu]').length"):
+        js("document.body.click()"); _t.sleep(0.4)
+    return not js("document.querySelectorAll('[role=menu]').length")
+
+def flow_download(asset_id=None, kind=None, quality="best", folder=None, timeout=180.0):
+    """Download a generated asset at the best quality the plan allows. See _impl."""
+    try:
+        return _flow_download_impl(asset_id=asset_id, kind=kind, quality=quality,
+                                   folder=folder, timeout=timeout)
+    finally:
+        # Always dismiss the menu: a leftover one swallows the next tile's
+        # More-options click, which surfaced as "Download menu item not found".
+        try: _flow_close_menus()
+        except Exception: pass
+
+def _flow_download_impl(asset_id=None, kind=None, quality="best", folder=None, timeout=180.0):
+    """Download a generated asset, choosing the best quality the plan allows.
+
+    asset_id: id from flow_generate()/flow_list_results() (UUID, or `thumb:` key).
+              Omit to take the first tile of `kind`.
+    kind:     "image" | "video" — narrows the tile search and picked quality.
+    quality:  "best" (default) picks the highest enabled tier and quietly skips
+              locked ones (e.g. 4K on a plan that does not allow it), so a Pro
+              plan downloads 2K/720p instead of failing. Or name one explicitly:
+              "original", "1K", "2K", "720p", "1080p", "4K". A locked explicit
+              choice raises rather than silently downgrading.
+    folder:   destination directory; created if missing. Defaults to
+              ~/Downloads/flow.
+
+    Returns {"ok", "path", "quality", "available", "requested", "errors"}.
+    """
+    dest = _os.path.expanduser(folder or _FLOW_DEFAULT_DL)
+    _os.makedirs(dest, exist_ok=True)
+    errors = []
+
+    # A menu left open from an earlier call (including one that raised) keeps the
+    # next More-options click from opening a fresh one.
+    _flow_close_menus()
+
+    tile = _flow_tile_for(asset_id, kind)
+    if not tile:
+        raise RuntimeError(f"flow_download: no {kind or 'asset'} tile matched {asset_id!r}")
+
+    before = set(_os.listdir(dest))
+    cdp("Browser.setDownloadBehavior", behavior="allow", downloadPath=dest, eventsEnabled=True)
+
+    # Open the menus for the resolved tile only.
+    click_at_xy(tile["x"], tile["y"]); _t.sleep(1.2)
+    if not _flow_click_js("[...document.querySelectorAll('[role=menuitem]')].find(x=>/Download/i.test(x.innerText))", 1.6):
+        raise RuntimeError("flow_download: Download menu item not found")
+
+    opts = _flow_quality_options()
+    if not opts:
+        raise RuntimeError("flow_download: no quality options appeared")
+    available = [o[0] for o in opts if o[2]]
+
+    if str(quality).strip().lower() == "best":
+        enabled = [o for o in opts if o[2]]
+        if not enabled: raise RuntimeError("flow_download: no enabled quality option")
+        head, rank, _ = max(enabled, key=lambda o: o[1])
+    else:
+        want = str(quality).strip()
+        match = next((o for o in opts if o[0].lower() == want.lower()), None)
+        if match is None and want.lower() == "original":
+            match = next((o for o in opts if o[0].lower().endswith("p") or o[0].upper().endswith("K")), None)
+        if match is None:
+            raise ValueError(f"flow_download: quality {quality!r} not offered; available {available}")
+        if not match[2]:
+            raise RuntimeError(f"flow_download: {match[0]} is locked on this plan; available {available}")
+        head = match[0]
+
+    # Click the chosen tier. Angular Material menu items are buttons, so a direct
+    # DOM click is deterministic; a coordinate click has to survive the submenu's
+    # open animation and the pointer passing over other rows. Try the DOM click
+    # first and fall back to the pointer only if no download starts.
+    fired = js(f"""(()=>{{const m=[...document.querySelectorAll('[role=menuitem]')]
+      .find(x=>(x.innerText||'').trim().startsWith({_json.dumps(head)}));
+      if(!m)return false;m.click();return true;}})()""")
+    if not fired:
+        raise RuntimeError(f"flow_download: could not click {head}")
+
+    path = _flow_wait_new_file(dest, before, timeout=8.0)
+    if not path and fired:
+        # Some tiers need a real pointer event; retry through the menu.
+        _flow_close_menus()
+        click_at_xy(tile["x"], tile["y"]); _t.sleep(1.2)
+        _flow_click_js("[...document.querySelectorAll('[role=menuitem]')].find(x=>/Download/i.test(x.innerText))", 1.6)
+        target = js(f"""(()=>{{const m=[...document.querySelectorAll('[role=menuitem]')]
+          .find(x=>(x.innerText||'').trim().startsWith({_json.dumps(head)}));
+          if(!m)return null;const r=m.getBoundingClientRect();
+          return {{x:r.x+r.width/2,y:r.y+r.height/2}};}})()""")
+        if target: click_at_xy(target["x"], target["y"])
+    path = _flow_wait_new_file(dest, before, timeout=timeout)
+    if not path:
+        errors.append(f"no file appeared in {dest} within {timeout:g}s "
+                      f"(upscaled downloads can be slow)")
+    return {"ok": bool(path), "path": path, "quality": head, "available": available,
+            "requested": quality if quality != "best" else "best", "errors": errors}

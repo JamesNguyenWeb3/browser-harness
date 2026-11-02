@@ -405,3 +405,82 @@ call once it is visible in the picker. Video results do not expose a UUID in the
   whatever ids appeared by the time the pending tiles cleared.
 - A generation that fails server-side leaves no new asset and reports
   `no new asset appeared after generation`.
+
+---
+
+# Downloading results at the best allowed quality
+
+Field-tested against `flow.google.com/u/2/project/489911df-…` (Google Pro) on 2026-11-01.
+Primitive: `flow_download()`.
+
+## Quick summary
+
+```python
+flow_download(kind="video")                       # best allowed tier, ~/Downloads/flow
+flow_download(asset_id="50aa573c-…", folder="/path/to/out")
+flow_download(kind="image", quality="2K")         # explicit tier
+```
+
+Each tile's **More options** menu has **Download**, which opens a quality submenu.
+Measured on a Pro plan:
+
+| Asset | Options |
+| --- | --- |
+| Image | `1K Original size`, `2K Upscaled`, `4K Upscaled`, `Upgrade` |
+| Video (720p source) | `720p Original size`, `1080p Upscaled`, `4K Upscaled`, `Upgrade` |
+
+**Locked tiers are rendered with `tabindex="-1"`** — that is the availability signal,
+not `aria-disabled` (which is absent). `Upgrade` is a call to action, never a quality.
+
+`quality="best"` picks the highest **enabled** tier, so a plan that disallows 4K
+downloads 2K (image) or 1080p (video) instead of failing — which is the behaviour you
+want when the output feeds a later step and you need the best you are entitled to.
+An explicitly requested but locked tier raises rather than silently downgrading.
+
+## Where files go
+
+`flow_download` sets `Browser.setDownloadBehavior(downloadPath=…)` for its own call, so
+the file lands in the folder you pass; the default is `~/Downloads/flow`, created if
+missing. That CDP setting is browser-wide and persists for the session, so pass a
+folder whenever the destination matters.
+
+## Upscaled downloads are asynchronous
+
+- Image 2K: toast *"Upscaling your image, download will start automatically."*, file
+  appears in ~5–10 s.
+- Video 1080p: *"Upscaling your video. This may take several minutes."*, file appeared
+  at ~36 s in testing.
+
+The primitive therefore waits for a **new, size-stable file** to appear in the target
+folder instead of assuming the click finished the job. `Original size` downloads
+immediately.
+
+## Clicking the tier: use a DOM click, not a pointer click
+
+The quality rows are Angular Material menu buttons. Driving them with a synthetic
+pointer click was unreliable — the submenu animates in, and a click aimed at a rect
+captured mid-animation landed on empty space and closed the menu, silently producing
+no download. `flow_download` calls `.click()` on the row instead and only falls back
+to a pointer click if no download starts within ~8s.
+
+Two related traps:
+
+- **A menu left open breaks the next call.** Its backdrop swallows the following
+  tile's More-options click, which surfaces as "Download menu item not found". The
+  primitive dismisses menus with Escape on entry and in a `finally`, so a raise does
+  not leave one behind.
+- **`body.click()` does not close these menus**; Escape does.
+
+## Filenames
+
+`<Prompt_slug>_<hash>[_<QUALITY>].<ext>`, e.g.
+`Stone_lighthouse_on_cliff_a5319152_2K.jpg` and
+`Waves_breaking_against_stone_lig…_49e9cd2f_1080p.mp4`. Long names are truncated with a
+literal `…` by Flow, so do not reconstruct names — use the returned `path`.
+
+## Limits
+
+- One asset per call; `asset_id` selects the tile, `kind` narrows when omitted.
+- A stuck pending tile does not block downloading: the download menu is per tile.
+- If no file appears before the timeout the result is `ok: False` with the folder in
+  the error; retry rather than assuming failure, since upscales queue server-side.
