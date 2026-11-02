@@ -386,3 +386,167 @@ def flow_compose_prompt(prompt, refs=None, clear_refs=False):
                                                       "errors": [], "warnings": []}
     return {"ok": bool(text["ok"] and ing["ok"]), "prompt": text["text"],
             "ingredients": ing["chips"], "errors": ing["errors"], "warnings": ing["warnings"]}
+
+# --- Google Flow: @-mentions in the prompt ---
+# Typing "@" in the prompt opens the same asset picker as the ingredients button.
+# Picking an asset replaces the "@" with an inline <span class="mention-chip"
+# data-mention-id=... data-reference-type=...> and also adds a chip beside the box.
+# Two behaviours make the naive sequence unsafe:
+#   * text typed while the popup is open is mirrored into the popup's search box
+#     AND left in the prompt, so "@20c7" ends up in the prompt text;
+#   * the "@" is only consumed when an asset is picked. A query that matches
+#     nothing leaves a stray "@" behind and the Add button disappears.
+# So the query goes to the popup's own search box (which takes focus when "@" is
+# typed), never to the editor.
+
+_FLOW_SEARCH = ".cdk-overlay-pane input.search-input"
+
+def _flow_search_box():
+    return js(f"""(()=>{{const i=document.querySelector({_FLOW_SEARCH!r});
+      if(!i)return null;const r=i.getBoundingClientRect();return {{x:r.x+r.width/2,y:r.y+r.height/2}};}})()""")
+
+def _flow_cursor_to_end():
+    """Put the caret at the end of the prompt, after any mention chips.
+
+    Collapsing to the editor's last child is not enough: once a mention is picked
+    the last child is the mention <span>, and typing there lands inside the chip
+    instead of after it. Collapse to the end of the deepest last node instead,
+    falling back to the end of the <p> and then the editor itself.
+    """
+    js("""(()=>{const e=document.querySelector('flow-rich-text-editor .ProseMirror');
+      if(!e)return;e.focus();
+      const p=e.querySelector('p')||e;
+      const range=document.createRange();range.selectNodeContents(p);range.collapse(false);
+      const s=getSelection();s.removeAllRanges();s.addRange(range);})()""")
+
+def _flow_mention_state():
+    return js("""(()=>{const e=document.querySelector('flow-rich-text-editor .ProseMirror');
+      return {text:e?e.innerText:null,
+              mentions:document.querySelectorAll('span.mention-chip').length,
+              overlay:!!document.querySelector('.cdk-overlay-pane')};})()""")
+
+def _flow_pick_from_popup(query=None, timeout=8.0):
+    """Filter the open @-popup by `query` and add the first match.
+
+    The query is typed into the popup's search input, not the editor: typing in the
+    editor is mirrored to both places and leaks the query into the prompt.
+    Returns the picked mentions, or None when nothing matched.
+    """
+    if query:
+        # "@" moves focus into the popup's search input, and each popup opens with an
+        # empty filter. Typing straight into it works; clicking or clearing the field
+        # first drops focus and the keystrokes go nowhere.
+        if not _flow_search_box(): return None
+        type_text(query, typing_delay=0.02)
+        _t.sleep(0.9)
+    mentions_before = _flow_mention_state()["mentions"]
+
+    def added(item_name, wait=4.0):
+        """Success is a new mention span; the clicks themselves report nothing useful
+        because adding closes the overlay underneath them."""
+        end = _t.time() + wait
+        while _t.time() < end:
+            if _flow_mention_state()["mentions"] > mentions_before: return item_name
+            _t.sleep(0.25)
+        return None
+
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        item = js("""(()=>{const it=document.querySelector('.cdk-overlay-pane .asset-item');
+          if(!it)return null;const r=it.getBoundingClientRect();
+          return {x:r.x+r.width/2,y:r.y+r.height/2,name:it.innerText.trim().replace(/\\n/g,' ')};})()""")
+        if not item: return None
+        click_at_xy(item["x"], item["y"])
+        # Two paths exist here and which one runs depends on the asset kind: picking
+        # the item can add the mention outright (overlay closes), or only select it,
+        # leaving "Add to prompt" to commit. Handle both.
+        hit = added(item["name"], wait=1.5)
+        if hit: return hit
+        add = js("""(()=>{const b=[...document.querySelectorAll('.cdk-overlay-pane button')]
+          .find(x=>/Add to prompt/i.test(x.innerText));
+          if(!b)return null;const r=b.getBoundingClientRect();
+          return {x:r.x+r.width/2,y:r.y+r.height/2};})()""")
+        if not add: return None
+        click_at_xy(add["x"], add["y"])
+        hit = added(item["name"], wait=4.0)
+        if hit: return hit
+        return None
+    return None
+
+def flow_mention(name, clear_text="@", timeout=8.0):
+    """Append an @-mention of `name` to the prompt, replacing the "@" it was typed with.
+
+    Call this with the cursor at the end of the prompt. It types "@", filters the
+    popup by `name`, picks the first match and returns the mention's label.
+
+    `clear_text`: on no match, the stray "@" is removed by deleting that many
+    characters. Pass None to leave the prompt untouched.
+
+    Raises RuntimeError when nothing matches, after removing the stray "@".
+    """
+    before = _flow_mention_state()
+    _flow_cursor_to_end()
+    _t.sleep(0.2)
+    type_text("@"); _t.sleep(1.2)
+    if not _flow_mention_state()["overlay"]:
+        raise RuntimeError("flow_mention: the @ popup did not open")
+    picked = _flow_pick_from_popup(name, timeout=timeout)
+    if picked is None:
+        # Nothing matched: the popup is gone and the "@" is still in the prompt.
+        # Focus is left in the closed popup's search box, so Backspace there would
+        # do nothing — put the caret back in the editor first.
+        if clear_text:
+            _t.sleep(0.3)
+            _flow_cursor_to_end()
+            _t.sleep(0.2)
+            for _ in range(len(clear_text) if isinstance(clear_text, str) else 1):
+                press_key("Backspace")
+            _t.sleep(0.3)
+        raise RuntimeError(f"flow_mention: no asset matched {name!r}")
+    return picked
+
+def flow_set_prompt_with_mentions(parts, typing_delay=0.02):
+    """Type a prompt interleaved with @-mentions.
+
+    `parts` is a list of strings (literal text) and 1-tuples ("mention", name):
+        ["A studio fashion sequence. Starting with ", ("mention", "Lisa"),
+         ", she is holding ", ("mention", "RedMud"), "."]
+
+    Picking a mention leaves the cursor in the editor, so the next literal part
+    continues the same sentence. Returns {"ok", "text", "mentions", "chips", "errors"}.
+
+    Note: an ingredient chip is ADDED for each mention and clearing the prompt text
+    does not remove those chips — use flow_clear_ingredients() to reset them.
+    """
+    errors = []
+    # Start from an empty editor; every literal part is appended in order, including
+    # the first one, so no part may be typed twice.
+    flow_set_prompt("", clear_first=True)
+    for part in parts:
+        if isinstance(part, str):
+            type_text(part, typing_delay=typing_delay)
+        else:
+            try:
+                flow_mention(part[1])
+            except RuntimeError as e:
+                errors.append(str(e))
+    _t.sleep(0.4)
+    state = _flow_mention_state()
+    return {"ok": not errors, "text": state["text"], "mentions": state["mentions"],
+            "chips": _flow_chips(), "errors": errors}
+
+def flow_clear_mentions():
+    """Remove inline mention spans from the prompt without wiping the rest of the text.
+
+    Clearing the prompt with flow_set_prompt() already drops mention spans; this is for
+    removing them while keeping the surrounding words. Returns spans removed.
+    """
+    n = 0
+    while js("document.querySelectorAll('span.mention-chip').length"):
+        ok = js("""(()=>{const m=document.querySelector('span.mention-chip');
+          if(!m)return false;m.remove();return true;})()""")
+        if not ok: break
+        n += 1
+        if n > 30: break
+    _flow_cursor_to_end()
+    return n

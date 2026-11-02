@@ -127,3 +127,54 @@ The helpers treat "Add to prompt clicked but chip count did not rise" as an erro
 - Does not type into or start generation; does not edit the video itself.
 - Requires the project page to render: a missing project redirects to `/404?reason=project` with "Project not found", and every primitive raises rather than guessing.
 - Uploading large videos is slow; the settle wait is 25 s per file before it reports an error.
+
+---
+
+# @-mentions (inline references)
+
+Field-tested against `flow.google.com/project/e23b42bb-8b41-42e2-9eaf-d5f25a224edb` on 2026-11-01.
+Primitives: `flow_mention()`, `flow_set_prompt_with_mentions()`, `flow_clear_mentions()`.
+
+## Quick summary
+
+- Typing `@` in the prompt opens the **same asset picker** as the ingredients button. Picking an asset replaces the `@` with an inline `<span class="mention-chip" data-mention-id=… data-reference-type=media>`, and **also adds a chip beside the prompt box**.
+- **Never type the query into the editor.** While the popup is open, keystrokes are mirrored into the popup's search box *and* left in the prompt, so `@20c7` would end up in the prompt text. `@` moves focus to the popup's `input.search-input` for you; type there.
+- The `@` is consumed only when an asset is picked. A query that matches nothing leaves a stray `@` and removes the Add button — `flow_mention()` deletes the `@` and raises.
+- Search filters only the **active tab** (All/Images/Videos/Voices/Characters/Avatars). Searching for a voice while on Images finds nothing; switch tabs first.
+
+## Composing a prompt with mentions
+
+```python
+flow_set_prompt_with_mentions([
+    "A studio fashion sequence. Starting with ", ("mention", "Lisa"),
+    ", she is holding ", ("mention", "RedMud"), ".",
+])
+# -> {'ok': True, 'text': 'A studio fashion sequence. Starting with Lisa, she is holding RedMud.',
+#     'mentions': 2, 'chips': 2, 'errors': []}
+```
+
+Each string is literal text; each `("mention", name)` is one `@` pick. Picking leaves the caret back in the editor, so the next literal continues the same sentence.
+
+Single mention, when the text is already in place:
+
+```python
+flow_mention("RedMud")   # types @, filters, picks, returns the label
+```
+
+`flow_mention` raises `RuntimeError` if nothing matches, after removing the stray `@`.
+
+## Two behaviours that make the naive sequence fail
+
+- **Caret placement.** After a pick, the editor's last child is the mention `<span>`. Collapsing the selection to the editor's last child puts the next `@` *inside* the chip, so it never opens the popup. The helper collapses to the end of the paragraph instead.
+- **Picking can take one of two paths.** Clicking the asset may add the mention outright and close the overlay, or only select it and leave **Add to prompt** to commit. The helper accepts either and confirms success by counting new mention spans — never by the click's return value, because the overlay closes underneath the click.
+
+## Clearing
+
+- `flow_set_prompt()` wipes mention spans along with the text.
+- **It does not remove the ingredient chips.** Mentions add chips beside the box; clear those with `flow_clear_ingredients()`. A prompt reset therefore leaves references attached unless you clear both.
+- `flow_clear_mentions()` removes the inline spans while keeping the surrounding words.
+
+## Limits
+
+- Mention resolution is by first match in the active tab; there is no exact-name matching, so pick names that are unique in that tab's list.
+- Requires the asset to already exist in the project (upload it first with `flow_attach_ingredients`).
