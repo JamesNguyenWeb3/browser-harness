@@ -289,3 +289,58 @@ The panel **remembers** the previous custom voice: reopening it can already show
   `image: True` but does not pick among them.
 - `finalize=True` clicks **Done**, which returns to the project and saves the
   character. Pass `False` to stay on the editor.
+
+---
+
+# Frames (first / last frame video)
+
+Field-tested against `flow.google.com/project/e23b42bb-…` on 2026-11-01.
+Primitives: `flow_set_frames()`, `flow_clear_frames()`.
+
+## Quick summary
+
+In **video + Frames** mode two slots appear under the prompt box:
+
+```
+[Start]  (swap_horiz)  [End]
+```
+
+Each opens a **"Select a frame image"** picker. Choosing an asset fills the slot and
+replaces its label with chip controls (`cancel` + `close`), so a **filled slot has no
+text to find it by** — the primitives count `button.chip-container .chip-image`
+instead.
+
+```python
+generate_setting_trigger(generate_type="video", video_type="frames")  # enter Frames mode
+flow_set_frames(start="characterA.png")            # last frame optional
+flow_set_frames(start="characterA.png", end="characterB.png")
+```
+
+The End frame is genuinely optional: `flow_set_frames(start=...)` leaves it empty and
+the video generates from the start frame alone.
+
+`flow_set_frames` does **not** switch into Frames mode for you — model, ratio and
+duration are separate choices — and raises if the slots are absent.
+
+## Behaviour worth knowing
+
+- **A left-open picker swallows the next click.** Its backdrop eats the slot click and
+  `document.body.click()` does not dismiss it; only the pane's own `Close` does. The
+  primitive closes any open picker before starting, and on a no-match failure, so a
+  retry works. Left unhandled this showed up as a confusing "frame picker did not
+  open" even though the click landed.
+- **The picker animates in**, so wait for both the title *and* an asset row before
+  searching rather than reading the pane once.
+- **Search is the picker's own box**, same as the mention picker; it filters within the
+  active tab (Images / Uploads).
+- **Success is a rising chip count**, not a click return value — the pane closes under
+  the click. Some assets also need an "Add to prompt" commit; both paths are handled.
+- **Only one asset in this project**, so a two-frame test sets the same image in both
+  slots. Distinct frames need distinct assets — upload them with
+  `flow_attach_ingredients()` first, or via the picker's **Upload media** (which, unlike
+  the character page, does expose a `input[type=file]` here).
+
+## Clearing
+
+`flow_clear_frames()` clicks each filled slot's remove control and returns how many it
+emptied; the Start/End labels come back.

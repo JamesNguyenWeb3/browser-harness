@@ -381,3 +381,24 @@ setting_trigger:
   "selector": null,
   "inShadowRoot": false
 }
+
+
+{
+  "tag": "button",
+  "text": "Start",
+  "ariaLabel": null,
+  "role": null,
+  "id": null,
+  "selector": null,
+  "inShadowRoot": false
+}
+
+{
+  "tag": "button",
+  "text": "End",
+  "ariaLabel": null,
+  "role": null,
+  "id": null,
+  "selector": null,
+  "inShadowRoot": false
+}

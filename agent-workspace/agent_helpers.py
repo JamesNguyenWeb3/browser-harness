@@ -874,3 +874,134 @@ def flow_create_character(name, prompt=None, image=None, personality=None,
         final_url = js("location.href")
     return {"ok": not errors, "name": name, "url": final_url, "voice": voice,
             "image": bool(portraits), "errors": errors, "warnings": warnings}
+
+# --- Google Flow: video "Frames" first/last frame slots ---
+# In video + Frames mode two slots appear under the prompt: a "Start" button and an
+# "End" button, each opening a "Select a frame image" picker. A chosen image fills the
+# slot and replaces the label with chip controls, so only the empty slot is findable
+# by text — the filled ones are counted via `.chip-image`.
+
+_FLOW_FRAME_TITLE = "Select a frame image"
+
+def _flow_frames_available():
+    """True when the prompt box shows Start/End frame slots (video + Frames mode)."""
+    return js("""(()=>{const t=[...document.querySelectorAll('button')].map(b=>(b.textContent||'').trim());
+      return t.includes('Start') || t.includes('End');})()""")
+
+def _flow_frame_count():
+    return js("document.querySelectorAll('button.chip-container .chip-image').length")
+
+def _flow_frame_pick(kind, query=None, timeout=20.0):
+    """Click a frame slot, pick an asset from its "Select a frame image" picker.
+
+    kind:  "start" | "end" — the slot label to click. Only an empty slot carries the
+           label; a filled one shows chip controls instead.
+    query: optional asset-name filter, typed into the picker's search box.
+
+    Returns {"ok", "asset"} — ok is False when the slot label is gone (already
+    filled) or the picker never produced an asset.
+    """
+    k = str(kind).strip().lower()
+    if k not in ("start", "end"): raise ValueError(f"frame kind must be start|end, got {kind!r}")
+    label = "Start" if k == "start" else "End"
+
+    # A frame picker left open from an earlier attempt swallows the slot click with
+    # its backdrop and body clicks do not dismiss it. Close it with its own button.
+    if js("!!document.querySelector('.cdk-overlay-pane')"):
+        _flow_click_js("""[...document.querySelectorAll('.cdk-overlay-pane button')]
+          .find(x=>x.getAttribute('aria-label')==='Close'||(x.textContent||'').trim()==='close')""", 1.0)
+        _flow_wait_closed(4.0)
+
+    before = _flow_frame_count()
+    if not _flow_click_js(f"[...document.querySelectorAll('button')].find(x=>(x.textContent||'').trim()==={label!r})", 1.8):
+        return {"ok": False, "asset": None, "error": f"{label} slot not found (already filled, or not in Frames mode)"}
+    # The picker animates in; poll for its title rather than reading once.
+    opened = False
+    end_open = _t.time() + 6.0
+    while _t.time() < end_open:
+        pane = js("(()=>{const p=document.querySelector('.cdk-overlay-pane');return p?p.innerText:'';})()")
+        if _FLOW_FRAME_TITLE in (pane or "") and js("!!document.querySelector('.cdk-overlay-pane .asset-item')"):
+            opened = True; break
+        _t.sleep(0.4)
+    if not opened:
+        return {"ok": False, "asset": None, "error": "frame picker did not open"}
+
+    if query:
+        if not _flow_search_box(): return {"ok": False, "asset": None, "error": "frame picker search box not found"}
+        type_text(query, typing_delay=0.02); _t.sleep(1.0)
+
+    deadline = _t.time() + timeout
+    while _t.time() < deadline:
+        item = js("""(()=>{const it=document.querySelector('.cdk-overlay-pane .asset-item');
+          if(!it)return null;const r=it.getBoundingClientRect();
+          return {x:r.x+r.width/2,y:r.y+r.height/2,name:it.innerText.trim().split(String.fromCharCode(10))[0]};})()""")
+        if not item:
+            # Leave no picker open on failure; its backdrop swallows the next click.
+            _flow_click_js("""[...document.querySelectorAll('.cdk-overlay-pane button')]
+              .find(x=>x.getAttribute('aria-label')==='Close'||(x.textContent||'').trim()==='close')""", 0.8)
+            _flow_wait_closed(3.0)
+            return {"ok": False, "asset": None, "error": "no asset matched in the frame picker"}
+        click_at_xy(item["x"], item["y"])
+        # Choosing the asset fills the slot and closes the picker. Some assets instead
+        # leave an "Add to prompt" button to commit; handle both and verify by count.
+        end = _t.time() + 5.0
+        while _t.time() < end:
+            if _flow_frame_count() > before:
+                if js("!!document.querySelector('.cdk-overlay-pane')"): _flow_wait_closed()
+                return {"ok": True, "asset": item["name"], "error": None}
+            add = js("""(()=>{const b=[...document.querySelectorAll('.cdk-overlay-pane button')]
+              .find(x=>/Add to prompt/i.test(x.textContent));
+              if(!b||b.disabled)return null;const r=b.getBoundingClientRect();
+              return {x:r.x+r.width/2,y:r.y+r.height/2};})()""")
+            if add: click_at_xy(add["x"], add["y"])
+            _t.sleep(0.4)
+        return {"ok": False, "asset": item["name"], "error": "slot did not fill after selecting the asset"}
+    return {"ok": False, "asset": None, "error": "timed out"}
+
+def flow_set_frames(start=None, end=None, swap=False):
+    """Set the first and/or last frame of a Frames-mode video.
+
+    start: asset name (or name fragment) already in the project, picked from the
+           Start slot's picker. Omit to leave the Start slot alone.
+    end:   same for the End slot. Optional — a single-frame video only needs `start`.
+    swap:  click Swap after both are set, exchanging first and last.
+
+    Requires video + Frames mode:
+        generate_setting_trigger(generate_type="video", video_type="frames")
+    which this does not do for you, because the model, ratio and duration are
+    separate choices.
+
+    Returns {"ok", "start", "end", "frames", "errors"}.
+    """
+    if swap and start is None and end is None:
+        return {"ok": _flow_swap_frames(), "start": None, "end": None,
+                "frames": _flow_frame_count(), "errors": []}
+    if not _flow_frames_available():
+        raise RuntimeError("flow_set_frames: Start/End slots not present — call "
+                           "generate_setting_trigger(generate_type='video', video_type='frames') first")
+    errors, out = [], {}
+    if start is not None:
+        r = _flow_frame_pick("start", start)
+        out["start"] = r["asset"]
+        if not r["ok"]: errors.append(f"start frame: {r['error']}")
+    if end is not None:
+        r = _flow_frame_pick("end", end)
+        out["end"] = r["asset"]
+        if not r["ok"]: errors.append(f"end frame: {r['error']}")
+    if swap and not errors: _flow_swap_frames()
+    return {"ok": not errors, "start": out.get("start"), "end": out.get("end"),
+            "frames": _flow_frame_count(), "errors": errors}
+
+def _flow_swap_frames():
+    return _flow_click_js("[...document.querySelectorAll('button')].find(x=>(x.textContent||'').trim()==='swap_horiz')", 1.4)
+
+def flow_clear_frames():
+    """Empty both frame slots. Returns slots cleared."""
+    n = 0
+    while js("document.querySelectorAll('button.chip-container').length"):
+        gone = js("""(()=>{const c=[...document.querySelectorAll('button.chip-container')].pop();
+          if(!c)return false;c.click();return true;})()""")
+        if not gone: break
+        n += 1; _t.sleep(0.6)
+        if n > 6: break
+    return n
