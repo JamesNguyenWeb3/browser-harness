@@ -340,4 +340,3 @@ setting_trigger:
 #  }, null, 2));
 #  console.log("Copied element metadata to clipboard!");
 #})();
-
