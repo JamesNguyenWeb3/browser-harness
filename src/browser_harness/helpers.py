@@ -173,12 +173,14 @@ _debug_click_counter = 0
 _last_mouse = None  # (x, y) of the synthetic cursor; None until the first move.
 
 
-def _mouse_move_to(x, y, steps=6):
+def _mouse_move_to(x, y, steps=None):
     """Walk the cursor to (x, y) with mouseMoved events so a click is not a teleport.
 
-    Eases out on approach and jitters each step, so the path is not a straight
-    line a page could test for. Starts from a random point near the target on
-    the first click, then from wherever the previous one ended.
+    The path is built to look like a hand rather than a lerp: 10-14 steps over
+    roughly 150-350 ms, eased along the way, with a small overshoot past the
+    target corrected by a short settle. A measured alternative (the previous
+    version) moved in 6 steps over ~60 ms straight onto the target, which is
+    both faster than a person and dead straight — an easy input to fingerprint.
 
     Only moves in a visible tab: a hidden tab never acks mouseMoved, so the
     call would block until the IPC timeout. Activating the tab to enable the
@@ -189,16 +191,71 @@ def _mouse_move_to(x, y, steps=6):
         if js("document.visibilityState") != "visible":
             _last_mouse = (x, y)
             return
+        steps = steps or random.randint(10, 14)
         sx, sy = _last_mouse or (x + random.randint(-120, 120), y + random.randint(-80, 80))
-        for i in range(1, steps + 1):
-            e = 1 - (1 - i / steps) ** 2
-            px = round(sx + (x - sx) * e + random.uniform(-1.5, 1.5))
-            py = round(sy + (y - sy) * e + random.uniform(-1.5, 1.5))
+        # Overshoot: half the time, aim slightly past the target on the main
+        # approach, then settle back — the way a hand lands on a target.
+        over = random.uniform(3.0, 6.0) if random.random() < 0.5 else 0.0
+        dist = max(1.0, ((x - sx) ** 2 + (y - sy) ** 2) ** 0.5)
+        ox, oy = x + (x - sx) / dist * over, y + (y - sy) / dist * over
+        settle = 3 if over else 0
+        main = max(1, steps - settle)
+        for i in range(1, main + 1):
+            e = 1 - (1 - i / main) ** 2
+            px = round(sx + (ox - sx) * e + random.uniform(-1.5, 1.5))
+            py = round(sy + (oy - sy) * e + random.uniform(-1.5, 1.5))
             cdp("Input.dispatchMouseEvent", type="mouseMoved", x=px, y=py, button="none", buttons=0, _response_timeout=1.5)
-            time.sleep(random.uniform(0.004, 0.012))
+            time.sleep(random.uniform(0.008, 0.020))
+        for i in range(1, settle + 1):
+            e = i / (settle + 1)
+            px = round(ox + (x - ox) * e + random.uniform(-1.0, 1.0))
+            py = round(oy + (y - oy) * e + random.uniform(-1.0, 1.0))
+            cdp("Input.dispatchMouseEvent", type="mouseMoved", x=px, y=py, button="none", buttons=0, _response_timeout=1.5)
+            time.sleep(random.uniform(0.010, 0.020))
     except Exception:
         pass  # occluded or busy renderer: fall back to a direct press
     _last_mouse = (x, y)
+
+def click_element(box, selector=None, inner=0.7, button="left", move=True):
+    """Click a random point inside an element's box instead of its exact centre.
+
+    `box` is a DOM element's viewport rect — the same `{x, y, width, height}`
+    that `DOM.getBoxModel` gives you as `content` (see `element_box`). Clicking
+    inside the target rather than on its centre keeps repeated clicks from
+    landing on one pixel while staying within the element, which jitter around
+    a point cannot guarantee: a 4px scatter on a 20px icon leaves the target.
+
+    `inner` is the fraction of the box used, centred: 0.7 keeps the click in the
+    middle 70% on each axis, away from rounded borders and child edge hit areas.
+
+    `selector` re-reads the element's box immediately before clicking, so a
+    layout shift between measuring and clicking cannot send the click elsewhere.
+
+    Returns the (x, y) that was clicked.
+    """
+    if selector:
+        box = js(f"""(()=>{{const e=document.querySelector({json.dumps(selector)});
+          if(!e)return null;const r=e.getBoundingClientRect();
+          return {{x:r.x,y:r.y,width:r.width,height:r.height}};}})()""") or box
+    w = max(1, float(box.get("width") or 1))
+    h = max(1, float(box.get("height") or 1))
+    inset_x = w * (1 - inner) / 2
+    inset_y = h * (1 - inner) / 2
+    x = float(box.get("x", 0)) + inset_x + random.uniform(0, w * inner)
+    y = float(box.get("y", 0)) + inset_y + random.uniform(0, h * inner)
+    click_at_xy(round(x), round(y), button=button, move=move)
+    return round(x), round(y)
+
+
+def element_box(selector):
+    """Viewport rect of the first element matching `selector`, or None.
+
+    The companion to click_element: measure once, then click inside the box.
+    """
+    return js(f"""(()=>{{const e=document.querySelector({json.dumps(selector)});
+      if(!e)return null;const r=e.getBoundingClientRect();
+      return {{x:r.x,y:r.y,width:r.width,height:r.height}};}})()""")
+
 
 def click_at_xy(x, y, button="left", clicks=1, jitter=0, move=True):
     """Click at (x, y). jitter>0 offsets the point by up to that many pixels,
@@ -741,6 +798,11 @@ def _load_agent_helpers():
     if not spec or not spec.loader:
         return
     module = importlib.util.module_from_spec(spec)
+    # Agent helpers are pasted in like core helpers: they call js(), click_at_xy(),
+    # cdp() unqualified. Give the module those names without the loader's own
+    # dunders (__package__ would make exec_module reject the module).
+    injected = {k: v for k, v in globals().items() if not k.startswith("__")}
+    module.__dict__.update(injected)
     spec.loader.exec_module(module)
     for name, value in vars(module).items():
         if name.startswith("_"):

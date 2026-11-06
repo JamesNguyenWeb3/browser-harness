@@ -657,3 +657,30 @@ Could not verify:
   `Target.setAutoAttach` themselves.
 - The specific 40-130 ms typing cadence and "inner 60%" click box as values
   that evade any particular vendor.
+
+### Input timing and click placement (2026-11-03)
+
+Measured on a scratch page, `mousedown` coordinates as the page saw them.
+
+| | before | after |
+| --- | --- | --- |
+| pointer samples to reach the target | 6 | 11–14 |
+| time from first move to click | ~40 ms | ~200–260 ms |
+| repeat clicks at the same call | identical pixel every time | identical (unchanged) |
+| `click_element(box)` on a 200×80 target | n/a | 6 distinct points, all inside |
+| `click_element` on a 20×20 target | n/a | 4/4 hits |
+
+Changed: `_mouse_move_to` now takes 10–14 steps with 8–20 ms gaps and, half the
+time, overshoots by 3–6 px before settling. This removes the sub-100 ms straight
+approach, which is the strongest input signal in the harness — a lerp that fast
+is not a hand.
+
+`click_element`/`element_box` were added rather than making jitter the default.
+Point-jitter cannot bound itself to the target: ±4 px on a 20 px icon leaves the
+element, which is why the whole Flow primitive set (chips, radio toggles, icon
+buttons) still calls `click_at_xy` with box centres. Scattering inside the box is
+both safer and human-like, and it verifiably does not miss small targets.
+
+Still unverified: whether any vendor scores either signal. As above, the probe
+lists are not public; the defensible claim is only that these patterns are cheap
+to detect, so removing them costs little.
